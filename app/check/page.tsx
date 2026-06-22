@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import Spinner from "@/components/Spinner";
+import Spinner from "../../components/Spinner";
 
 interface Check {
   key: string;
