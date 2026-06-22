@@ -1,4 +1,5 @@
 import type { Segment, Word } from "./types";
+import { isThai, mergeThaiTokens } from "./thai";
 
 export interface Cue {
   start: number;
@@ -7,14 +8,18 @@ export interface Cue {
 }
 
 // Mirror of the chunking logic in ass.ts, for the live HTML preview.
+// Thai segments are first merged from per-character tokens into readable groups
+// so the karaoke highlight (and word-pop) lands on whole chunks with real
+// durations instead of flickering on single characters.
 export function buildCues(segments: Segment[], maxWords: number): Cue[] {
   const max = maxWords > 0 ? maxWords : 1;
   const cues: Cue[] = [];
   for (const seg of segments) {
-    const words =
+    let words: Word[] =
       seg.words && seg.words.length > 0
         ? seg.words
         : [{ start: seg.start, end: seg.end, text: seg.text }];
+    if (isThai(seg.text)) words = mergeThaiTokens(words);
     for (let i = 0; i < words.length; i += max) {
       const chunk = words.slice(i, i + max);
       cues.push({
