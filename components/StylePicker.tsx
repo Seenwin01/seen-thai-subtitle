@@ -3,6 +3,40 @@
 import { useState } from "react";
 import type { SubtitleStyle } from "@/lib/types";
 import { STYLE_PRESETS } from "@/lib/styles";
+import StylePreview from "./StylePreview";
+
+// Tiny static sample that shows a style's colours/outline/box at a glance,
+// rendered inside each template button.
+function MiniSample({ s }: { s: SubtitleStyle }) {
+  return (
+    <div
+      style={{
+        borderRadius: 8,
+        padding: "7px 4px",
+        textAlign: "center",
+        overflow: "hidden",
+        background: "linear-gradient(135deg,#242438,#0f0f18)",
+      }}
+    >
+      <span
+        style={{
+          fontWeight: s.bold ? 800 : 600,
+          fontSize: 13,
+          color: s.color,
+          textShadow:
+            s.boxOpacity > 0 ? "none" : `0 0 3px ${s.outlineColor}, 0 1px 2px rgba(0,0,0,.9)`,
+          background: s.boxOpacity > 0 ? `rgba(0,0,0,${s.boxOpacity})` : "transparent",
+          padding: s.boxOpacity > 0 ? "1px 6px" : 0,
+          borderRadius: 5,
+          textTransform: s.uppercase ? "uppercase" : "none",
+          whiteSpace: "nowrap",
+        }}
+      >
+        ใส่ซับ<span style={{ color: s.highlightColor }}>ไวรัล</span>
+      </span>
+    </div>
+  );
+}
 
 export default function StylePicker({
   style,
@@ -31,6 +65,12 @@ export default function StylePicker({
 
   return (
     <div className="space-y-5">
+      {/* Live animated preview of the selected style */}
+      <div>
+        <p className="mb-2 text-sm font-semibold text-white/80">ตัวอย่างสด</p>
+        <StylePreview style={style} />
+      </div>
+
       <div>
         <p className="mb-2 text-sm font-semibold text-white/80">เทมเพลตซับ</p>
         <div className="grid grid-cols-2 gap-2">
@@ -38,13 +78,16 @@ export default function StylePicker({
             <button
               key={p.id}
               onClick={() => onChange({ ...p })}
-              className={`rounded-xl px-3 py-2 text-sm transition ${
+              className={`overflow-hidden rounded-xl p-2 transition ${
                 style.id === p.id
-                  ? "btn-grad font-semibold"
+                  ? "btn-grad ring-2 ring-white/40"
                   : "glass hover:border-brand-400"
               }`}
             >
-              {p.name}
+              <MiniSample s={p} />
+              <div className="mt-1.5 truncate text-center text-xs font-semibold">
+                {p.name}
+              </div>
             </button>
           ))}
         </div>
@@ -58,24 +101,27 @@ export default function StylePicker({
               {templates.map((t) => (
                 <div
                   key={t.id}
-                  className={`group relative flex items-center rounded-xl text-sm transition ${
+                  className={`group relative overflow-hidden rounded-xl transition ${
                     style.id === t.id
-                      ? "btn-grad font-semibold"
+                      ? "btn-grad ring-2 ring-white/40"
                       : "glass hover:border-brand-400"
                   }`}
                 >
                   <button
                     onClick={() => onChange({ ...t })}
-                    className="flex-1 truncate px-3 py-2 text-left"
+                    className="w-full p-2 text-left"
                     title={t.name}
                   >
-                    {t.name}
+                    <MiniSample s={t} />
+                    <div className="mt-1.5 truncate px-1 text-center text-xs font-semibold">
+                      {t.name}
+                    </div>
                   </button>
                   {onDeleteTemplate && (
                     <button
                       onClick={() => onDeleteTemplate(t.id)}
                       aria-label="ลบเทมเพลต"
-                      className="px-2 text-white/50 hover:text-red-300"
+                      className="absolute right-1 top-1 rounded bg-black/40 px-1.5 text-white/60 hover:text-red-300"
                     >
                       ✕
                     </button>

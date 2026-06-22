@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Segment, SubtitleStyle } from "@/lib/types";
 import { buildCues, activeCue } from "@/lib/cues";
+import { isThai } from "@/lib/thai";
 import { pickEmphasis } from "@/lib/keywords";
 import { emojiForCue } from "@/lib/emoji";
 
@@ -50,6 +51,8 @@ export default function VideoPreview({
     cue && style.autoEmphasis ? pickEmphasis(cue.words.map((w) => w.text)) : null;
   const emphasisColor = style.emphasisColor ?? style.highlightColor;
   const emoji = cue && style.autoEmoji ? emojiForCue(cue.words.map((w) => w.text)) : null;
+  // Thai has no inter-word spaces; keep groups joined so phrases read naturally.
+  const sep = cue && isThai(cue.words.map((w) => w.text).join("")) ? "" : " ";
 
   const align =
     style.position === "top"
@@ -83,7 +86,11 @@ export default function VideoPreview({
             }}
           >
             {cue.words.map((w, i) => {
-              const active = style.wordHighlight && t >= w.start && t <= w.end;
+              // Karaoke: a group stays highlighted until the next group begins,
+              // so the highlight moves continuously instead of flickering.
+              const next = cue.words[i + 1];
+              const until = next ? next.start : w.end;
+              const active = style.wordHighlight && t >= w.start && t < until;
               const color = active
                 ? style.highlightColor
                 : emph && emph[i]
@@ -101,7 +108,7 @@ export default function VideoPreview({
                   }}
                 >
                   {w.text}
-                  {i < cue.words.length - 1 ? " " : ""}
+                  {i < cue.words.length - 1 ? sep : ""}
                 </span>
               );
             })}
