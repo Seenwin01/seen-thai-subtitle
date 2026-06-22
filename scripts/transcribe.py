@@ -5,20 +5,11 @@ Thai speech-to-text with word-level timestamps using faster-whisper (local).
 Usage:
     python scripts/transcribe.py <input_video_or_audio> <output_json> [model] [language]
 
-Output JSON shape:
-{
-  "language": "th",
-  "duration": 12.34,
-  "segments": [
-    {"id": 0, "start": 0.0, "end": 2.1, "text": "สวัสดีครับ",
-     "words": [{"start": 0.0, "end": 0.4, "text": "สวัสดี"}, ...]}
-  ]
-}
-
 Requires: faster-whisper, and ffmpeg available on PATH.
 Install: pip install faster-whisper
 """
 import json
+import os
 import sys
 
 
@@ -30,7 +21,7 @@ def main():
 
     inp = sys.argv[1]
     out = sys.argv[2]
-    model_name = sys.argv[3] if len(sys.argv) > 3 else "small"
+    model_name = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("WHISPER_MODEL", "base")
     language = sys.argv[4] if len(sys.argv) > 4 else "th"
 
     try:
@@ -61,7 +52,7 @@ def main():
         language=language,
         word_timestamps=True,
         vad_filter=True,
-        beam_size=5,
+        beam_size=1,
     )
 
     total = max(float(getattr(info, "duration", 0) or 0), 0.001)
