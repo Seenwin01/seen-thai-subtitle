@@ -1,14 +1,16 @@
 import type { SubtitleStyle } from "./types";
 
 // Viral subtitle presets. Fonts must exist on the rendering machine.
-// "Sarabun" and "Noto Sans Thai" are recommended Thai fonts (install via
-// the README instructions). They fall back gracefully if missing.
+// The production image ships "Noto Sans Thai" (and the TLWG Thai family), so
+// every preset uses an installed Thai-capable font — otherwise libass falls
+// back to a Latin face and the chosen style doesn't render as selected.
+// Drop extra .ttf files into ./fonts to add more faces, then reference them here.
 
 export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "viral-yellow",
     name: "ไวรัลเหลือง",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 54,
     color: "#FFFFFF",
     highlightColor: "#FFE100",
@@ -44,7 +46,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "clean-box",
     name: "กล่องคลีน",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 46,
     color: "#FFFFFF",
     highlightColor: "#FFD166",
@@ -60,7 +62,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "news-lower",
     name: "ข่าวล่าง",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 40,
     color: "#FFFFFF",
     highlightColor: "#FFFFFF",
@@ -94,7 +96,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "bold-red",
     name: "แดงเด้ง",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 60,
     color: "#FFFFFF",
     highlightColor: "#FF3B3B",
@@ -111,7 +113,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "clean-white",
     name: "คลีนขาว",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 44,
     color: "#FFFFFF",
     highlightColor: "#FFFFFF",
@@ -127,7 +129,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "dark-box",
     name: "กล่องดำ",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 46,
     color: "#FFFFFF",
     highlightColor: "#FFD166",
@@ -196,7 +198,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "gold-lux",
     name: "ทองหรู",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 52,
     color: "#FFFFFF",
     highlightColor: "#FFD700",
@@ -214,7 +216,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "mint",
     name: "มินต์",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 50,
     color: "#FFFFFF",
     highlightColor: "#34D399",
@@ -230,7 +232,7 @@ export const STYLE_PRESETS: SubtitleStyle[] = [
   {
     id: "podcast-lower",
     name: "พอดแคสต์ล่าง",
-    font: "Sarabun",
+    font: "Noto Sans Thai",
     fontSize: 40,
     color: "#FFFFFF",
     highlightColor: "#A78BFA",
