@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import Spinner from "@/components/Spinner";
-import ProgressBar from "@/components/ProgressBar";
+import Spinner from "../../components/Spinner";
+import ProgressBar from "../../components/ProgressBar";
 import type { JobSummary } from "@/lib/jobsummary";
 
 const STATE_COLOR: Record<string, string> = {
