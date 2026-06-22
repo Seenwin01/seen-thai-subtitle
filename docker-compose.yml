@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - WHISPER_MODEL=small
+      # Optional — enable AI clip ranking / titling:
+      # - ANTHROPIC_API_KEY=sk-ant-...
+      # - OPENAI_API_KEY=sk-...
+    volumes:
+      # persist jobs + custom fonts across restarts
+      - ./storage:/app/storage
+      - ./fonts:/app/fonts
+    restart: unless-stopped
