@@ -4,9 +4,9 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import type { Clip } from "@/lib/clips";
-import ProgressBar from "@/components/ProgressBar";
-import { pollJob } from "@/components/poll";
-import Spinner from "@/components/Spinner";
+import ProgressBar from "../../components/ProgressBar";
+import { pollJob } from "../../components/poll";
+import Spinner from "../../components/Spinner";
 
 function fmt(t: number): string {
   const m = Math.floor(t / 60);
