@@ -45,7 +45,20 @@ def main():
     except Exception:
         pass
 
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    # On shared CPU containers CTranslate2 sees ALL host cores (e.g. 48) and
+    # spins up one thread workspace per core, which can blow past a small RAM
+    # limit and get the process OOM-killed ("python3 exited null"). Cap the
+    # thread/worker count; both are overridable via env.
+    cpu_threads = int(os.environ.get("WHISPER_CPU_THREADS", "2"))
+    num_workers = int(os.environ.get("WHISPER_NUM_WORKERS", "1"))
+
+    model = WhisperModel(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        num_workers=num_workers,
+    )
 
     segments_iter, info = model.transcribe(
         inp,
