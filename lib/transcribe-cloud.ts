@@ -1,39 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
-// ---------------------------------------------------------------------------
-// Cloud transcription (Whisper large-v3) — accurate Thai STT without OOM.
-// Self-contained types (no dependency on lib/types) so it slots into any repo.
-// Default provider is Groq (OpenAI-compatible, cheap, fast, large-v3).
-// Env: GROQ_API_KEY (default) or OPENAI_API_KEY + STT_PROVIDER=openai.
-// ---------------------------------------------------------------------------
-
+// Cloud transcription (Whisper large-v3, Groq by default) for accurate Thai STT.
 export type SttProvider = "groq" | "openai";
+export interface CloudWord { start: number; end: number; text: string; }
+export interface CloudSegment { start: number; end: number; text: string; words?: CloudWord[]; }
+export interface TranscribeOptions { provider?: SttProvider; language?: string; prompt?: string; model?: string; }
 
-export interface CloudWord {
-  start: number;
-  end: number;
-  text: string;
-}
-export interface CloudSegment {
-  start: number;
-  end: number;
-  text: string;
-  words?: CloudWord[];
-}
-
-export interface TranscribeOptions {
-  provider?: SttProvider;
-  language?: string;
-  prompt?: string;
-  model?: string;
-}
-
-interface ProviderConfig {
-  url: string;
-  key: string;
-  model: string;
-}
+interface ProviderConfig { url: string; key: string; model: string; }
 
 function resolveProvider(opts: TranscribeOptions): ProviderConfig {
   const provider = opts.provider || (process.env.STT_PROVIDER as SttProvider) || "groq";
@@ -87,7 +61,22 @@ function dropArtifacts(segments: CloudSegment[]): CloudSegment[] {
   return out;
 }
 
-/** Transcribe an audio/video file with a cloud Whisper large-v3 endpoint. */
+// Anti-hallucination: in a Thai clip, Whisper sometimes drifts into other
+// scripts (Cyrillic/Greek) or repeats one char many times — both are garbage.
+const FOREIGN_SCRIPT = /[Ѐ-ӿͰ-Ͽ֐-׿؀-ۿ]/; // Cyrillic, Greek, Hebrew, Arabic
+function looksHallucinated(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return true;
+  if (FOREIGN_SCRIPT.test(t)) return true;            // wrong-script drift
+  if (/(.)\1{5,}/.test(t)) return true;               // one char repeated 6+ times
+  if (/(\S{1,6})(\s?\1){3,}/.test(t)) return true;    // a short token repeated 4+ times
+  return false;
+}
+function dropHallucinations(segments: CloudSegment[], language?: string): CloudSegment[] {
+  if (language && language !== "th") return segments;
+  return segments.filter((s) => !looksHallucinated(s.text));
+}
+
 export async function transcribeCloud(filePath: string, opts: TranscribeOptions = {}): Promise<CloudSegment[]> {
   const cfg = resolveProvider(opts);
   const buf = await readFile(filePath);
@@ -100,6 +89,7 @@ export async function transcribeCloud(filePath: string, opts: TranscribeOptions 
   form.append("timestamp_granularities[]", "word");
   form.append("timestamp_granularities[]", "segment");
   form.append("language", opts.language || "th");
+  form.append("temperature", "0"); // deterministic -> far less hallucination
   if (opts.prompt) form.append("prompt", opts.prompt);
 
   const res = await fetch(cfg.url, { method: "POST", headers: { Authorization: `Bearer ${cfg.key}` }, body: form });
@@ -108,13 +98,16 @@ export async function transcribeCloud(filePath: string, opts: TranscribeOptions 
     throw new Error(`Transcription failed (${cfg.model}): ${res.status} ${res.statusText} ${detail}`);
   }
   const data = (await res.json()) as ApiResponse;
+  const lang = opts.language || "th";
 
   const segments = data.segments ?? [];
   if (!segments.length) {
     const text = (data.text || "").trim();
-    if (!text) return [];
+    if (!text || looksHallucinated(text)) return [];
     return [{ start: 0, end: Math.max(text.length / 12, 2), text }];
   }
-  if (data.words && data.words.length) return dropArtifacts(attachWords(segments, data.words));
-  return dropArtifacts(segments.map((s) => ({ start: s.start, end: s.end, text: s.text.trim() })));
+  const attached = (data.words && data.words.length)
+    ? attachWords(segments, data.words)
+    : segments.map((s) => ({ start: s.start, end: s.end, text: s.text.trim() }));
+  return dropHallucinations(dropArtifacts(attached), lang);
 }
