@@ -117,7 +117,7 @@ export function generateAss(
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Default,${style.font},${style.fontSize},${primary},${primary},${outline},${backColour},${bold},0,0,0,100,100,0,0,${borderStyle},${style.outlineWidth},1,${alignment(
+    `Style: Default,${style.font},${Math.round(style.fontSize * 1.5)},${primary},${primary},${outline},${backColour},${bold},0,0,0,100,100,0,0,${borderStyle},${style.outlineWidth},1,${alignment(
       style.position
     )},40,40,${marginV},1`,
     "",
@@ -140,6 +140,7 @@ export function generateAss(
         : [{ start: seg.start, end: seg.end, text: seg.text }];
     // Merge per-character Thai tokens into readable, mark-safe groups.
     if (thai) words = mergeThaiTokens(words);
+    words = spreadIfCollapsed(words, seg.start, seg.end);
 
     const cues = chunkWords(words, style.maxWordsPerCue);
 
@@ -181,9 +182,9 @@ export function generateAss(
         const rendered = cue
           .map((cw, j) => {
             const t = escapeText(applyCase(cw.text, style.uppercase));
-            if (j === i && style.wordPop) {
+            if (j === i && (style.wordPop ?? true)) {
               // scale pop: shrink -> overshoot -> settle, timed to event start
-              return `{\\fscx70\\fscy70\\t(0,90,\\fscx118\\fscy118)\\t(90,170,\\fscx100\\fscy100)\\c${highlight}}${t}{\\c${primary}}`;
+              return `{\\fscx80\\fscy80\\t(0,90,\\fscx135\\fscy135)\\t(90,200,\\fscx122\\fscy122)\\c${highlight}}${t}{\\c${primary}}`;
             }
             const color = j === i ? highlight : emph[j] ? emphasis : primary;
             return wrap(t, color);
@@ -204,4 +205,23 @@ export function generateAss(
   }
 
   return header + "\n" + lines.join("\n") + "\n";
+}
+
+// When a segment lacks per-word timestamps, all groups share one timing so the
+// karaoke can't advance. Spread groups evenly across the segment duration
+// (weighted by text length) so highlighting still moves word-by-word.
+function spreadIfCollapsed(words: Word[], segStart: number, segEnd: number): Word[] {
+  if (words.length < 2) return words;
+  const distinct = new Set(words.map((w) => Math.round(w.start * 100))).size;
+  if (distinct >= 2) return words;
+  const total = words.reduce((n, w) => n + Math.max(1, (w.text || "").length), 0);
+  const dur = Math.max(0.2, segEnd - segStart);
+  let acc = 0;
+  return words.map((w) => {
+    const len = Math.max(1, (w.text || "").length);
+    const s = segStart + (acc / total) * dur;
+    acc += len;
+    const e = segStart + (acc / total) * dur;
+    return { start: s, end: e, text: w.text };
+  });
 }
