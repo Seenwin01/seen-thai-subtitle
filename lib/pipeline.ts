@@ -13,6 +13,31 @@ const CHUNK_SECONDS = 25;
 const SNAP_WINDOW = 8; // look +-8s around the target for a silence to cut at
 const MIN_CHUNK = 5;
 
+// Cloud STT inserts stray space tokens inside Thai (Thai is written without
+// spaces) which show up as "เว ลา". Drop whitespace tokens that sit between two
+// Thai characters; keep spaces around English/numbers ("Everest Platinum").
+const TH = /[\u0E00-\u0E7F]/;
+function stripThaiSpaces(words: { start: number; end: number; text: string }[]) {
+  const out: { start: number; end: number; text: string }[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if ((w.text || "").trim() === "") {
+      const prevText = out.length ? out[out.length - 1].text : "";
+      let j = i + 1;
+      while (j < words.length && (words[j].text || "").trim() === "") j++;
+      const nextText = j < words.length ? words[j].text : "";
+      const prevThai = TH.test(prevText.slice(-1));
+      const nextThai = TH.test((nextText || "").slice(0, 1));
+      if (prevThai && nextThai) { if (out.length) out[out.length - 1].end = w.end; continue; }
+    }
+    out.push({ ...w });
+  }
+  return out;
+}
+function cleanThaiText(t: string): string {
+  return (t || "").replace(/([\u0E00-\u0E7F])\s+(?=[\u0E00-\u0E7F])/g, "$1");
+}
+
 async function wavDuration(file: string): Promise<number> {
   try {
     const out = await run("ffprobe", [
@@ -113,12 +138,13 @@ export async function transcribeJob(
       cloud = []; // a single failed chunk must not kill the whole job
     }
     for (const s of cloud) {
+      const cw = stripThaiSpaces(s.words ?? []);
       segments.push({
         id: id++,
         start: s.start + startT,
         end: s.end + startT,
-        text: s.text,
-        words: (s.words ?? []).map((w) => ({
+        text: cleanThaiText(s.text),
+        words: cw.map((w) => ({
           start: w.start + startT,
           end: w.end + startT,
           text: w.text,
