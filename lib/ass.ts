@@ -1,4 +1,5 @@
 import type { Segment, SubtitleStyle, Word } from "./types";
+import { isThai as isThaiWord, mergeThaiTokens as mergeThaiWords } from "./thai";
 
 // Convert "#RRGGBB" -> ASS "&HAABBGGRR" (alpha 00 = opaque, FF = transparent)
 function hexToAss(hex: string, alpha = 0): string {
@@ -130,7 +131,7 @@ export function generateAss(
     color === primary ? t : `{\\c${color}}${t}{\\c${primary}}`;
 
   for (const seg of segments) {
-    const thai = isThai(seg.text);
+    const thai = isThaiWord(seg.text);
     // Thai is written with no inter-word spaces; spaced languages keep " ".
     const sep = thai ? "" : " ";
 
@@ -141,7 +142,7 @@ export function generateAss(
     // Merge per-character Thai tokens into readable, mark-safe groups.
     if (thai) {
       words = explodeIfSparse(words, seg.start, seg.end);
-      words = mergeThaiTokens(words);
+      words = mergeThaiWords(words);
     }
 
     const cues = chunkWords(words, style.maxWordsPerCue);
