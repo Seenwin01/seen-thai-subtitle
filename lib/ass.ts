@@ -139,8 +139,10 @@ export function generateAss(
         ? seg.words
         : [{ start: seg.start, end: seg.end, text: seg.text }];
     // Merge per-character Thai tokens into readable, mark-safe groups.
-    if (thai) words = mergeThaiTokens(words);
-    words = spreadIfCollapsed(words, seg.start, seg.end);
+    if (thai) {
+      words = explodeIfSparse(words, seg.start, seg.end);
+      words = mergeThaiTokens(words);
+    }
 
     const cues = chunkWords(words, style.maxWordsPerCue);
 
@@ -207,21 +209,21 @@ export function generateAss(
   return header + "\n" + lines.join("\n") + "\n";
 }
 
-// When a segment lacks per-word timestamps, all groups share one timing so the
-// karaoke can't advance. Spread groups evenly across the segment duration
-// (weighted by text length) so highlighting still moves word-by-word.
-function spreadIfCollapsed(words: Word[], segStart: number, segEnd: number): Word[] {
-  if (words.length < 2) return words;
-  const distinct = new Set(words.map((w) => Math.round(w.start * 100))).size;
-  if (distinct >= 2) return words;
-  const total = words.reduce((n, w) => n + Math.max(1, (w.text || "").length), 0);
+// Cloud STT sometimes returns a whole sentence as ONE token with no per-word
+// timing. The server has no Thai word segmenter, so such a line can't be split
+// or karaoke'd. When timing is collapsed (1 token, or all words share a start),
+// explode the text into per-character tokens with linear timing; mergeThaiTokens
+// then regroups them into mark-safe chunks that the karaoke loop can advance.
+function explodeIfSparse(words: Word[], segStart: number, segEnd: number): Word[] {
+  if (!words.length) return words;
+  const distinct = new Set(words.map((w) => Math.round((w.start || 0) * 100))).size;
+  if (words.length >= 2 && distinct >= 2) return words; // already has real per-word timing
+  const chars = Array.from(words.map((w) => w.text || "").join(""));
+  if (chars.length < 2) return words;
   const dur = Math.max(0.2, segEnd - segStart);
-  let acc = 0;
-  return words.map((w) => {
-    const len = Math.max(1, (w.text || "").length);
-    const s = segStart + (acc / total) * dur;
-    acc += len;
-    const e = segStart + (acc / total) * dur;
-    return { start: s, end: e, text: w.text };
-  });
+  return chars.map((ch, i) => ({
+    start: segStart + (i / chars.length) * dur,
+    end: segStart + ((i + 1) / chars.length) * dur,
+    text: ch,
+  }));
 }
