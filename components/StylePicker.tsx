@@ -209,6 +209,28 @@ export default function StylePicker({
         </Control>
       </div>
 
+      <div className="grid grid-cols-2 gap-3">
+        <Control label="สีขอบ">
+          <input
+            type="color"
+            value={style.outlineColor}
+            onChange={(e) => set({ outlineColor: e.target.value })}
+            className="h-8 w-full rounded bg-transparent"
+          />
+        </Control>
+        <Control label="พื้นหลังกล่อง">
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={style.boxOpacity}
+            onChange={(e) => set({ boxOpacity: Number(e.target.value) })}
+            className="w-full"
+          />
+        </Control>
+      </div>
+
       <Control label="คำต่อบรรทัด">
         <input
           type="range"
