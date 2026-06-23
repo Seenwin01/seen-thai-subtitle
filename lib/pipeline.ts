@@ -1,17 +1,16 @@
 import path from "path";
 import fs from "fs";
 import { jobPath } from "./storage";
-import { run, runStream } from "./ffmpeg";
-import { bandPct, parseWhisperPct } from "./progress";
-import type { Transcript } from "./types";
-
-const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
-const WHISPER_MODEL = process.env.WHISPER_MODEL || "small";
+import { run } from "./ffmpeg";
+import type { Segment, Transcript } from "./types";
+import { transcribeCloud } from "./transcribe-cloud";
 
 /**
- * Shared transcription pipeline: extract 16kHz mono audio, run local Whisper
- * (Thai, word timestamps), and persist job.json. Reports coarse progress via
- * the optional onProgress(pct, step) callback.
+ * Transcription pipeline. Extract 16kHz mono audio then transcribe with a cloud
+ * Whisper large-v3 endpoint (Groq by default) for accurate Thai — the old local
+ * "small" model was inaccurate AND OOM-prone on a 1GB box.
+ *
+ * Required env: GROQ_API_KEY  (or OPENAI_API_KEY + STT_PROVIDER=openai)
  */
 export async function transcribeJob(
   jobId: string,
@@ -20,31 +19,31 @@ export async function transcribeJob(
 ): Promise<Transcript> {
   onProgress?.(5, "กำลังแยกเสียง");
   const audioFile = jobPath(jobId, "audio.wav");
-  await run("ffmpeg", [
-    "-y", "-i", videoFile, "-vn", "-ac", "1", "-ar", "16000", audioFile,
-  ]);
+  await run("ffmpeg", ["-y", "-i", videoFile, "-vn", "-ac", "1", "-ar", "16000", audioFile]);
 
-  onProgress?.(10, "AI กำลังถอดเสียงภาษาไทย");
-  const scriptPath = path.join(process.cwd(), "scripts", "transcribe.py");
-  const transcriptJson = jobPath(jobId, "transcript.json");
-  await runStream(
-    PYTHON_BIN,
-    [scriptPath, audioFile, transcriptJson, WHISPER_MODEL, "th"],
-    (line) => {
-      const pct = parseWhisperPct(line);
-      // map whisper's 0..100 onto the 10..90 band
-      if (pct !== null) onProgress?.(bandPct(pct, 100, 10, 90), "AI กำลังถอดเสียงภาษาไทย");
-    }
-  );
+  onProgress?.(25, "AI กำลังถอดเสียงภาษาไทย (cloud large-v3)");
+  const cloud = await transcribeCloud(audioFile, {
+    language: "th",
+    prompt: process.env.STT_PROMPT || undefined,
+  });
 
   onProgress?.(95, "กำลังจัดรูปแบบซับ");
-  const raw = JSON.parse(fs.readFileSync(transcriptJson, "utf-8"));
+  // Map cloud result onto the repo's Segment shape (id + words are required).
+  const segments: Segment[] = cloud.map((s, i) => ({
+    id: i,
+    start: s.start,
+    end: s.end,
+    text: s.text,
+    words: (s.words ?? []).map((w) => ({ start: w.start, end: w.end, text: w.text })),
+  }));
+
+  const duration = segments.length ? segments[segments.length - 1].end : 0;
   const transcript: Transcript = {
     jobId,
-    language: raw.language ?? "th",
-    duration: raw.duration ?? 0,
+    language: "th",
+    duration,
     videoFile: path.basename(videoFile),
-    segments: raw.segments ?? [],
+    segments,
   };
   fs.writeFileSync(jobPath(jobId, "job.json"), JSON.stringify(transcript));
   return transcript;
