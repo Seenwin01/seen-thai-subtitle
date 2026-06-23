@@ -4,6 +4,7 @@ import { jobPath } from "./storage";
 import { run, runStream } from "./ffmpeg";
 import type { Segment, Transcript } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
+import { correctThai, redistributeWords } from "./correct";
 
 // Split long audio into ~25s chunks so one garbled stretch (noise/music) can't
 // cascade and ruin the rest. Cuts are SNAPPED to a nearby silence so a word is
@@ -152,6 +153,23 @@ export async function transcribeJob(
       });
     }
     onProgress?.(20 + Math.round(((ci + 1) / nChunks) * 70), "AI กำลังถอดเสียงภาษาไทย");
+  }
+
+  // Optional AI correction pass (Gemini) — fixes obvious Thai STT word errors
+  // from context. Graceful: no key / failure -> keeps the raw transcript.
+  if (segments.length) {
+    try {
+      const corrected = await correctThai(segments.map((s) => s.text));
+      if (corrected.length === segments.length) {
+        for (let i = 0; i < segments.length; i++) {
+          const ct = corrected[i];
+          if (ct && ct !== segments[i].text) {
+            segments[i].text = ct;
+            segments[i].words = redistributeWords(ct, segments[i].start, segments[i].end);
+          }
+        }
+      }
+    } catch { /* keep original transcript on any failure */ }
   }
 
   // free the temporary chunk files (volume is small)
