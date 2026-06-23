@@ -187,7 +187,7 @@ export function generateAss(
             const t = escapeText(applyCase(cw.text, style.uppercase));
             if (j === i && (style.wordPop ?? true)) {
               // scale pop: shrink -> overshoot -> settle, timed to event start
-              return `{\\fscx80\\fscy80\\t(0,90,\\fscx135\\fscy135)\\t(90,200,\\fscx122\\fscy122)\\c${highlight}}${t}{\\c${primary}}`;
+              return `{\\fscy85\\t(0,90,\\fscy125)\\t(90,220,\\fscy112)\\c${highlight}}${t}{\\c${primary}}`;
             }
             const color = j === i ? highlight : emph[j] ? emphasis : primary;
             return wrap(t, color);
