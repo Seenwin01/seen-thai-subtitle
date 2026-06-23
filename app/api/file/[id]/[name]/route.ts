@@ -16,7 +16,7 @@ const MIME: Record<string, string> = {
 
 // Parse a single "bytes=" Range header against the file size.
 // Returns null when absent/invalid/unsatisfiable (caller serves full 200).
-export function parseRange(header: string | null, size: number): { start: number; end: number } | null {
+function parseRange(header: string | null, size: number): { start: number; end: number } | null {
   if (!header) return null;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!m) return null;
