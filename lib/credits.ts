@@ -26,7 +26,7 @@ export const PLANS: Plan[] = [
     priceYearly: 0,
     credits: 10,
     cycle: "month",
-    maxClipMinutes: 2,
+    maxClipMinutes: 999,
     watermark: true,
     features: [
       "10 เครดิต/เดือน",
