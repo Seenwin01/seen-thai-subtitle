@@ -96,14 +96,14 @@ export default function VideoPreview({
                 : emph && emph[i]
                 ? emphasisColor
                 : undefined;
-              const pop = active && style.wordPop;
+              const pop = active && (style.wordPop ?? true);
               return (
                 <span
                   key={i}
                   style={{
                     color,
                     display: pop ? "inline-block" : undefined,
-                    transform: pop ? "scale(1.18)" : undefined,
+                    transform: pop ? "scale(1.25)" : undefined,
                     transition: "transform .12s ease",
                   }}
                 >
