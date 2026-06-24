@@ -3,69 +3,74 @@ import fs from "fs";
 import { jobPath } from "./storage";
 import { run } from "./ffmpeg";
 import { correctThai } from "./correct";
+import { mergeThaiTokens } from "./thai";
 import type { Segment, Transcript, Word } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
 
-// Cloud Whisper sometimes merges 15-20s of speech into one segment. A subtitle
-// that long sticks on screen and drifts out of sync. Split segments into short
-// cues (<= ~MAX_DUR s / ~MAX_CHARS chars) at space boundaries, keeping each
-// word's real timestamp. Done BEFORE the Gemini pass so corrected lines stay
-// short and spreadChars introduces only a tiny timing error.
-const MAX_DUR = 4;
-const MAX_CHARS = 30;
-function splitSegments(segs: Segment[]): Segment[] {
+const MAX_DUR = 4; // seconds per cue
+const MAX_WORDS = 12; // words per cue
+const MAX_CHARS = 42; // chars per cue
+
+// Cloud Whisper returns per-character tokens and sometimes breaks a SEGMENT in
+// the middle of a word (e.g. "เครื่องยนต" | "์ดีเซล"), which leaves orphan vowel
+// marks at the start of a cue and makes ass.ts (which chunks seg.words straight
+// into cues) cut mid-word. Fix: flatten every token into one timed stream, merge
+// it into real Thai WORDS (lib/thai.ts, dictionary-glued), then re-chunk into
+// cues at WORD boundaries only. job.json now holds word-level tokens, so the
+// burned .ass is always word-aligned.
+function rechunk(words: Word[]): Segment[] {
   const out: Segment[] = [];
+  let buf: Word[] = [];
   let id = 0;
-  for (const s of segs) {
-    const ws: Word[] =
-      s.words && s.words.length ? s.words : [{ start: s.start, end: s.end, text: s.text }];
-    let buf: Word[] = [];
-    let chars = 0;
-    const flush = () => {
-      const text = buf.map((w) => w.text).join("").trim();
-      if (text) {
-        out.push({ id: id++, start: buf[0].start, end: buf[buf.length - 1].end, text, words: buf.slice() });
-      }
-      buf = [];
-      chars = 0;
-    };
-    for (const w of ws) {
-      buf.push(w);
-      chars += Array.from(w.text || "").length;
-      const dur = w.end - buf[0].start;
-      const isSpace = !/\S/.test(w.text || "");
-      const hard = chars >= MAX_CHARS * 1.6;
-      if ((isSpace && (dur >= MAX_DUR || chars >= MAX_CHARS)) || hard) flush();
+  const flush = () => {
+    const text = buf.map((w) => w.text).join("").trim();
+    if (text) {
+      out.push({ id: id++, start: buf[0].start, end: buf[buf.length - 1].end, text, words: buf.slice() });
     }
-    if (buf.length) flush();
+    buf = [];
+  };
+  for (const w of words) {
+    buf.push(w);
+    const dur = w.end - buf[0].start;
+    const chars = buf.reduce((n, x) => n + Array.from(x.text).length, 0);
+    if (dur >= MAX_DUR || buf.length >= MAX_WORDS || chars >= MAX_CHARS) flush();
   }
+  flush();
   return out;
 }
 
-// When Gemini / the glossary rewrites a line, its original per-character word
-// tokens no longer match the new text, so we regenerate them: one token per
-// character, spread evenly across the segment's [start, end]. lib/thai.ts then
-// re-groups these into real Thai words (Intl.Segmenter). Because segments are
-// already short (splitSegments), the even spread is close enough to real timing.
-function spreadChars(text: string, start: number, end: number): Word[] {
+function resegment(segments: Segment[]): Segment[] {
+  const all: Word[] = [];
+  for (const s of segments) {
+    const ws = s.words && s.words.length ? s.words : [{ start: s.start, end: s.end, text: s.text }];
+    for (const w of ws) all.push(w);
+  }
+  if (!all.length) return segments;
+  return rechunk(mergeThaiTokens(all));
+}
+
+// Rebuild word tokens for a rewritten line: spread chars over its time span,
+// then merge back into Thai words so the cue stays word-aligned.
+function wordsFor(text: string, start: number, end: number): Word[] {
   const chars = Array.from(text);
   const n = chars.length || 1;
   const dur = Math.max(end - start, 0.01);
-  return chars.map((ch, i) => ({
+  const spread: Word[] = chars.map((ch, i) => ({
     start: start + (dur * i) / n,
     end: start + (dur * (i + 1)) / n,
     text: ch,
   }));
+  return mergeThaiTokens(spread);
 }
 
-// Force canonical spelling for brand / model names that STT + the LLM mishear
-// (e.g. the wheel/body-kit brand "VICTOR" -> "WICTOR"/"วิคเตอร์"). Extend via
-// env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
-//   STT_GLOSSARY="wictor=VICTOR,วิคเตอร์=VICTOR,เรนเจอร์=Ranger"
+// Force canonical spelling for brand / model names that STT + the LLM mishear.
+// Extend via env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
+//   STT_GLOSSARY="wictor=VICTOR,วิคเตอร์=VICTOR,everless=Everest"
 function buildGlossary(): Array<[RegExp, string]> {
   const g: Array<[RegExp, string]> = [
     [/\bw[i1]ctor\b/gi, "VICTOR"],
     [/วิ[คกแ]เตอร์/g, "VICTOR"],
+    [/\bever(?:less|est)?\b/gi, "Everest"],
   ];
   for (const pair of (process.env.STT_GLOSSARY || "").split(",")) {
     const [from, to] = pair.split("=").map((x) => x.trim());
@@ -82,7 +87,7 @@ function applyGlossary(segments: Segment[]): Segment[] {
   return segments.map((s) => {
     let t = s.text;
     for (const [re, to] of glossary) t = t.replace(re, to);
-    return t !== s.text ? { ...s, text: t, words: spreadChars(t, s.start, s.end) } : s;
+    return t !== s.text ? { ...s, text: t, words: wordsFor(t, s.start, s.end) } : s;
   });
 }
 
@@ -90,8 +95,8 @@ function applyGlossary(segments: Segment[]): Segment[] {
  * Transcription pipeline:
  *   1) extract 16kHz mono audio
  *   2) transcribe with cloud Whisper large-v3 (Groq)
- *   3) split long segments into short, well-timed cues
- *   4) Gemini double-check (correctThai) + glossary (e.g. VICTOR)
+ *   3) re-segment into word-aligned cues (no mid-word cuts)
+ *   4) Gemini double-check (correctThai) + glossary
  * Steps 4 never fail the job; on any error the transcript is kept as-is.
  *
  * Required env: GROQ_API_KEY (STT) and GEMINI_API_KEY (correction, optional).
@@ -119,11 +124,11 @@ export async function transcribeJob(
     words: (s.words ?? []).map((w) => ({ start: w.start, end: w.end, text: w.text })),
   }));
 
-  // keep cues short & well-timed before any text rewriting
-  segments = splitSegments(segments);
+  // merge per-character tokens into word-aligned cues
+  segments = resegment(segments);
 
-  // Gemini double-check + glossary. Lines whose text changed get fresh
-  // per-character tokens (spreadChars); any failure keeps the transcript as-is.
+  // Gemini double-check + glossary. Rewritten lines get fresh word tokens so the
+  // cue stays word-aligned. Any failure keeps the transcript as-is.
   if (segments.length) {
     onProgress?.(80, "Gemini checking words");
     try {
@@ -132,7 +137,7 @@ export async function transcribeJob(
         segments = segments.map((s, i) => {
           const nt = (corrected[i] ?? s.text).trim();
           return nt && nt !== s.text.trim()
-            ? { ...s, text: nt, words: spreadChars(nt, s.start, s.end) }
+            ? { ...s, text: nt, words: wordsFor(nt, s.start, s.end) }
             : s;
         });
       }
