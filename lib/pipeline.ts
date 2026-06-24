@@ -13,7 +13,15 @@ const MAX_CHARS = 42;
 // Diagnostic for the last Gemini proofread (read back via /api/job/<id>).
 let lastProof: Record<string, unknown> = { status: "not-run" };
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// gemini-2.5-flash is often 503 ("high demand"); fall back to other models and
+// retry transient errors. Override the chain with env GEMINI_MODELS.
+const GEMINI_MODELS = (process.env.GEMINI_MODELS || "gemini-2.5-flash,gemini-2.0-flash,gemini-1.5-flash")
+  .split(",")
+  .map((m) => m.trim())
+  .filter(Boolean);
+
 async function geminiCorrect(lines: string[]): Promise<string[] | null> {
   const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!key) {
@@ -30,52 +38,61 @@ async function geminiCorrect(lines: string[]): Promise<string[] | null> {
   const sys =
     `You proofread Thai subtitles produced by automatic speech-to-text from ${domain}. ` +
     `You receive a JSON array of consecutive subtitle lines. Fix ONLY transcription errors, ` +
-    `using context across lines: misheard words, wrong Thai tone/vowels (e.g. มา->ม้า), ` +
-    `non-words (e.g. ยอดมิ->ยอดนิยม, ครัศ->ครับ), and garbled English loanwords/brands ` +
+    `using context across lines: misheard words, wrong Thai tone/vowels (e.g. มา->ม้า, ต่าม->ตาม), ` +
+    `non-words (e.g. ยอดมิ->ยอดนิยม, ครัศ->ครับ, กระจาง->กระจัง), and garbled English loanwords/brands ` +
     `(e.g. วอัลเคลีกท์/Oklick->อะคริลิค, Everlight/Everless->Everest). ` +
     `Keep real brand/model names (Ford, Everest, Ranger, VICTOR, Platinum, Wildtrak). ` +
     `Do NOT translate, paraphrase, merge, split, reorder, add or delete lines, and keep each ` +
     `line's length close to the original. Return ONLY a JSON array of the corrected strings, ` +
     `exactly the same length and order as the input.`;
   const user = `Return a JSON array of exactly ${lines.length} corrected strings.\n\nInput:\n${JSON.stringify(lines)}`;
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-      {
-        method: "POST",
-        headers: { "x-goog-api-key": key, "content-type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: sys }] },
-          contents: [{ role: "user", parts: [{ text: user }] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 8192 },
-        }),
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: sys }] },
+    contents: [{ role: "user", parts: [{ text: user }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 8192 },
+  });
+
+  let last: Record<string, unknown> = { status: "failed" };
+  for (const model of GEMINI_MODELS) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          { method: "POST", headers: { "x-goog-api-key": key, "content-type": "application/json" }, body }
+        );
+        if (res.ok) {
+          const data = (await res.json()) as {
+            candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+          };
+          const raw = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
+          const m = raw.match(/\[[\s\S]*\]/);
+          if (!m) {
+            last = { status: "no-array", model, raw: raw.slice(0, 200) };
+            break;
+          }
+          const arr = JSON.parse(m[0]);
+          if (!Array.isArray(arr) || arr.length !== lines.length) {
+            last = { status: "len-mismatch", model, got: Array.isArray(arr) ? arr.length : -1, want: lines.length };
+            break;
+          }
+          lastProof = { status: "ok", model };
+          return arr.map((x) => String(x));
+        }
+        const errBody = await res.text().catch(() => "");
+        last = { status: "http-error", model, code: res.status, body: errBody.slice(0, 160) };
+        if (res.status === 503 || res.status === 429 || res.status === 500) {
+          await sleep(1500 * (attempt + 1)); // transient: retry same model
+          continue;
+        }
+        break; // non-retryable: try next model
+      } catch (e) {
+        last = { status: "exception", model, err: String((e as Error)?.message ?? e).slice(0, 160) };
+        await sleep(1000);
       }
-    );
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      lastProof = { status: "http-error", code: res.status, body: body.slice(0, 300) };
-      return null;
     }
-    const data = (await res.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const raw = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-    const m = raw.match(/\[[\s\S]*\]/);
-    if (!m) {
-      lastProof = { status: "no-array", raw: raw.slice(0, 300) };
-      return null;
-    }
-    const arr = JSON.parse(m[0]);
-    if (!Array.isArray(arr) || arr.length !== lines.length) {
-      lastProof = { status: "len-mismatch", got: Array.isArray(arr) ? arr.length : -1, want: lines.length };
-      return null;
-    }
-    lastProof = { status: "ok", model: GEMINI_MODEL };
-    return arr.map((x) => String(x));
-  } catch (e) {
-    lastProof = { status: "exception", err: String((e as Error)?.message ?? e).slice(0, 200) };
-    return null;
   }
+  lastProof = last;
+  return null;
 }
 
 function rechunk(words: Word[]): Segment[] {
