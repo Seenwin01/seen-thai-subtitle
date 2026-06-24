@@ -6,29 +6,33 @@ import { mergeThaiTokens } from "./thai";
 import type { Segment, Transcript, Word } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
 
-const MAX_DUR = 4; // seconds per cue
-const MAX_WORDS = 12; // words per cue
-const MAX_CHARS = 42; // chars per cue
+const MAX_DUR = 4;
+const MAX_WORDS = 12;
+const MAX_CHARS = 42;
 
-// ---------------------------------------------------------------------------
-// Context-aware Gemini proofreader. Sends the WHOLE transcript at once so the
-// model can use surrounding lines to pick the right word (tones มา↔ม้า, non-
-// words ยอดมิ→ยอดนิยม, garbled loanwords Oklick→อะคริลิค, Everlight→Everest).
-// Returns corrected lines (same length/order) or null on any failure.
-// Tune the domain hint with env STT_DOMAIN.
+// Diagnostic for the last Gemini proofread (read back via /api/job/<id>).
+let lastProof: Record<string, unknown> = { status: "not-run" };
+
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 async function geminiCorrect(lines: string[]): Promise<string[] | null> {
   const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  if (!key || !lines.length) return null;
+  if (!key) {
+    lastProof = { status: "no-key" };
+    return null;
+  }
+  if (!lines.length) {
+    lastProof = { status: "no-lines" };
+    return null;
+  }
   const domain =
     process.env.STT_DOMAIN ||
     "a Thai-language Ford pickup/SUV review video (models: Everest, Ranger, VICTOR body kit, Platinum, Wildtrak)";
   const sys =
     `You proofread Thai subtitles produced by automatic speech-to-text from ${domain}. ` +
     `You receive a JSON array of consecutive subtitle lines. Fix ONLY transcription errors, ` +
-    `using context across lines: misheard words, wrong Thai tone/vowels (e.g. มา↔ม้า), ` +
-    `non-words (e.g. ยอดมิ→ยอดนิยม), and garbled English loanwords/brands ` +
-    `(e.g. Oklick→อะคริลิค, Everlight/Everless→Everest, Daytim→Daytime). ` +
+    `using context across lines: misheard words, wrong Thai tone/vowels (e.g. มา->ม้า), ` +
+    `non-words (e.g. ยอดมิ->ยอดนิยม, ครัศ->ครับ), and garbled English loanwords/brands ` +
+    `(e.g. วอัลเคลีกท์/Oklick->อะคริลิค, Everlight/Everless->Everest). ` +
     `Keep real brand/model names (Ford, Everest, Ranger, VICTOR, Platinum, Wildtrak). ` +
     `Do NOT translate, paraphrase, merge, split, reorder, add or delete lines, and keep each ` +
     `line's length close to the original. Return ONLY a JSON array of the corrected strings, ` +
@@ -47,25 +51,33 @@ async function geminiCorrect(lines: string[]): Promise<string[] | null> {
         }),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      lastProof = { status: "http-error", code: res.status, body: body.slice(0, 300) };
+      return null;
+    }
     const data = (await res.json()) as {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
     };
     const raw = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
     const m = raw.match(/\[[\s\S]*\]/);
-    if (!m) return null;
+    if (!m) {
+      lastProof = { status: "no-array", raw: raw.slice(0, 300) };
+      return null;
+    }
     const arr = JSON.parse(m[0]);
-    if (!Array.isArray(arr) || arr.length !== lines.length) return null;
+    if (!Array.isArray(arr) || arr.length !== lines.length) {
+      lastProof = { status: "len-mismatch", got: Array.isArray(arr) ? arr.length : -1, want: lines.length };
+      return null;
+    }
+    lastProof = { status: "ok", model: GEMINI_MODEL };
     return arr.map((x) => String(x));
-  } catch {
+  } catch (e) {
+    lastProof = { status: "exception", err: String((e as Error)?.message ?? e).slice(0, 200) };
     return null;
   }
 }
 
-// Cloud Whisper returns per-character tokens and sometimes breaks a SEGMENT in
-// the middle of a word, which leaves orphan vowel marks at the start of a cue.
-// Flatten every token into one timed stream, merge into real Thai WORDS
-// (lib/thai.ts, dictionary-glued), then re-chunk at WORD boundaries only.
 function rechunk(words: Word[]): Segment[] {
   const out: Segment[] = [];
   let buf: Word[] = [];
@@ -97,7 +109,6 @@ function resegment(segments: Segment[]): Segment[] {
   return rechunk(mergeThaiTokens(all));
 }
 
-// Rebuild word tokens for a rewritten line so the cue stays word-aligned.
 function wordsFor(text: string, start: number, end: number): Word[] {
   const chars = Array.from(text);
   const n = chars.length || 1;
@@ -110,8 +121,6 @@ function wordsFor(text: string, start: number, end: number): Word[] {
   return mergeThaiTokens(spread);
 }
 
-// Pin canonical brand spellings deterministically (belt & braces after Gemini).
-// Extend via env STT_GLOSSARY="wrong=correct,..." e.g. "oklick=อะคริลิค".
 function buildGlossary(): Array<[RegExp, string]> {
   const g: Array<[RegExp, string]> = [
     [/\bw[i1]ctor\b/gi, "VICTOR"],
@@ -137,16 +146,6 @@ function applyGlossary(segments: Segment[]): Segment[] {
   });
 }
 
-/**
- * Transcription pipeline:
- *   1) extract 16kHz mono audio
- *   2) transcribe with cloud Whisper large-v3 (Groq)
- *   3) re-segment into word-aligned cues (no mid-word cuts)
- *   4) context-aware Gemini proofread + glossary
- * Step 4 never fails the job; on any error the transcript is kept as-is.
- *
- * Required env: GROQ_API_KEY (STT) and GEMINI_API_KEY (correction, optional).
- */
 export async function transcribeJob(
   jobId: string,
   videoFile: string,
@@ -170,19 +169,20 @@ export async function transcribeJob(
     words: (s.words ?? []).map((w) => ({ start: w.start, end: w.end, text: w.text })),
   }));
 
-  // merge per-character tokens into word-aligned cues
   segments = resegment(segments);
 
-  // context-aware Gemini proofread; rewritten lines get fresh word tokens
+  let changed = 0;
   if (segments.length) {
     onProgress?.(80, "AI proofreading words");
     const corrected = await geminiCorrect(segments.map((s) => s.text));
     if (corrected) {
       segments = segments.map((s, i) => {
         const nt = (corrected[i] ?? s.text).trim();
-        return nt && nt !== s.text.trim()
-          ? { ...s, text: nt, words: wordsFor(nt, s.start, s.end) }
-          : s;
+        if (nt && nt !== s.text.trim()) {
+          changed++;
+          return { ...s, text: nt, words: wordsFor(nt, s.start, s.end) };
+        }
+        return s;
       });
     }
     segments = applyGlossary(segments);
@@ -197,6 +197,7 @@ export async function transcribeJob(
     videoFile: path.basename(videoFile),
     segments,
   };
+  (transcript as unknown as Record<string, unknown>).proofread = { ...lastProof, changed };
   fs.writeFileSync(jobPath(jobId, "job.json"), JSON.stringify(transcript));
   return transcript;
 }
