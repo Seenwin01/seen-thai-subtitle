@@ -46,8 +46,10 @@ function chunkWords(words: Word[], max: number): Word[][] {
 
 /**
  * Generate a full .ass subtitle file.
- * `emphasize` (optional) is injected so this module stays dependency-free; it
- * receives a cue's word texts and returns which words to colour as keywords.
+ * `emphasize` colours keywords; `emojiOf` appends an emoji; `lumaAt(t)` (0-255)
+ * enables auto-contrast: each cue's base text + outline colour is chosen from the
+ * scene brightness behind it (bright scene -> dark text/white outline, dark scene
+ * -> white text/black outline). Highlight/emphasis colours are kept as-is.
  */
 export function generateAss(
   segments: Segment[],
@@ -56,7 +58,8 @@ export function generateAss(
   playH: number,
   watermark?: string,
   emphasize?: (texts: string[]) => boolean[],
-  emojiOf?: (texts: string[]) => string | null
+  emojiOf?: (texts: string[]) => string | null,
+  lumaAt?: (t: number) => number
 ): string {
   const borderStyle = style.boxOpacity > 0 ? 3 : 1;
   const backColour = hexToAss("#000000", 1 - style.boxOpacity);
@@ -67,13 +70,14 @@ export function generateAss(
   const bold = style.bold ? -1 : 0;
   const marginV = Math.round(playH * 0.08);
 
-  // style.fontSize is authored on a 1000px-tall reference, so the real ASS size
-  // scales with the video height (e.g. 54 -> ~5.4% of height). Without this the
-  // value was used raw against PlayResY (1920), making captions tiny and the
-  // slider barely move. Outline scales the same way so the ratio stays constant.
+  // fontSize authored on a 1000px-tall reference -> scale with the video height.
   const sizeScale = playH / 1000;
   const fontSize = Math.max(8, Math.round(style.fontSize * sizeScale));
   const outlineW = Math.max(0, +(style.outlineWidth * sizeScale).toFixed(2));
+
+  // auto-contrast colours (when lumaAt provided)
+  const AC_DARK = hexToAss("#0B0B0B");
+  const AC_LIGHT = hexToAss("#FFFFFF");
 
   const header = [
     "[Script Info]",
@@ -94,8 +98,6 @@ export function generateAss(
   ].join("\n");
 
   const lines: string[] = [];
-  const wrap = (t: string, color: string) =>
-    color === primary ? t : `{\\c${color}}${t}{\\c${primary}}`;
 
   for (const seg of segments) {
     const words =
@@ -107,6 +109,25 @@ export function generateAss(
     for (const cue of cues) {
       const cueStart = cue[0].start;
       const cueEnd = cue[cue.length - 1].end;
+
+      // per-cue base + outline colour (auto-contrast or the style default)
+      let base = primary;
+      let cueOutline = outline;
+      let pre = "";
+      if (lumaAt) {
+        const y = lumaAt(cueStart);
+        if (y >= 140) {
+          base = AC_DARK;
+          cueOutline = AC_LIGHT;
+        } else {
+          base = AC_LIGHT;
+          cueOutline = AC_DARK;
+        }
+        pre = `{\\c${base}\\3c${cueOutline}}`;
+      }
+      const wrap = (t: string, color: string) =>
+        color === base ? t : `{\\c${color}}${t}{\\c${base}}`;
+
       const emph =
         style.autoEmphasis && emphasize
           ? emphasize(cue.map((w) => w.text))
@@ -118,23 +139,22 @@ export function generateAss(
       if (!perWord) {
         const text = applyCase(cue.map((w) => w.text).join(" ").trim(), style.uppercase);
         lines.push(
-          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${escapeText(text)}${tail}`
+          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${pre}${escapeText(text)}${tail}`
         );
         continue;
       }
 
       if (!style.wordHighlight) {
-        // static cue, keywords coloured permanently
         const rendered = cue
-          .map((w, j) => wrap(escapeText(applyCase(w.text, style.uppercase)), emph[j] ? emphasis : primary))
+          .map((w, j) => wrap(escapeText(applyCase(w.text, style.uppercase)), emph[j] ? emphasis : base))
           .join(" ");
         lines.push(
-          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${rendered}${tail}`
+          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${pre}${rendered}${tail}`
         );
         continue;
       }
 
-      // karaoke: one event per word; active=highlight, keyword=emphasis, else primary
+      // karaoke: one event per word; active=highlight, keyword=emphasis, else base
       for (let i = 0; i < cue.length; i++) {
         const w = cue[i];
         const start = w.start;
@@ -143,15 +163,14 @@ export function generateAss(
           .map((cw, j) => {
             const t = escapeText(applyCase(cw.text, style.uppercase));
             if (j === i && style.wordPop) {
-              // scale pop: shrink -> overshoot -> settle, timed to event start
-              return `{\\fscx70\\fscy70\\t(0,90,\\fscx118\\fscy118)\\t(90,170,\\fscx100\\fscy100)\\c${highlight}}${t}{\\c${primary}}`;
+              return `{\\fscx70\\fscy70\\t(0,90,\\fscx118\\fscy118)\\t(90,170,\\fscx100\\fscy100)\\c${highlight}}${t}{\\c${base}}`;
             }
-            const color = j === i ? highlight : emph[j] ? emphasis : primary;
+            const color = j === i ? highlight : emph[j] ? emphasis : base;
             return wrap(t, color);
           })
           .join(" ");
         lines.push(
-          `Dialogue: 0,${secToAss(start)},${secToAss(end)},Default,,0,0,,${rendered}${tail}`
+          `Dialogue: 0,${secToAss(start)},${secToAss(end)},Default,,0,0,,${pre}${rendered}${tail}`
         );
       }
     }
