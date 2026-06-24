@@ -3,12 +3,28 @@ import fs from "fs";
 import { jobPath } from "./storage";
 import { run } from "./ffmpeg";
 import { correctThai } from "./correct";
-import type { Segment, Transcript } from "./types";
+import type { Segment, Transcript, Word } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
 
-// Force canonical spelling for brand / model names that STT + the LLM tend to
-// mishear (e.g. the wheel/body-kit brand "VICTOR" -> "WICTOR"/"วิคเตอร์").
-// Add more via env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
+// When Gemini / the glossary rewrites a line, its original per-character word
+// tokens no longer match the new text, so we regenerate them: one token per
+// character, spread evenly across the segment's [start, end]. lib/thai.ts then
+// re-groups these into real Thai words (Intl.Segmenter). Without this the line
+// would have no word tokens and could not be segmented ("ไม่เป็นคำ").
+function spreadChars(text: string, start: number, end: number): Word[] {
+  const chars = Array.from(text);
+  const n = chars.length || 1;
+  const dur = Math.max(end - start, 0.01);
+  return chars.map((ch, i) => ({
+    start: start + (dur * i) / n,
+    end: start + (dur * (i + 1)) / n,
+    text: ch,
+  }));
+}
+
+// Force canonical spelling for brand / model names that STT + the LLM mishear
+// (e.g. the wheel/body-kit brand "VICTOR" -> "WICTOR"/"วิคเตอร์"). Extend via
+// env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
 //   STT_GLOSSARY="wictor=VICTOR,วิคเตอร์=VICTOR,เรนเจอร์=Ranger"
 function buildGlossary(): Array<[RegExp, string]> {
   const g: Array<[RegExp, string]> = [
@@ -30,7 +46,7 @@ function applyGlossary(segments: Segment[]): Segment[] {
   return segments.map((s) => {
     let t = s.text;
     for (const [re, to] of glossary) t = t.replace(re, to);
-    return t !== s.text ? { ...s, text: t, words: [] } : s;
+    return t !== s.text ? { ...s, text: t, words: spreadChars(t, s.start, s.end) } : s;
   });
 }
 
@@ -70,8 +86,8 @@ export async function transcribeJob(
 
   // Gemini double-check: fix misheard Thai words, homophones, proper nouns.
   // Only the wording is sent; segment count / order / timing stay put. Lines
-  // whose text changed drop per-word karaoke timing (renderer falls back to
-  // per-segment timing). Any failure keeps the uncorrected transcript.
+  // whose text changed get fresh per-character tokens (spreadChars) so they can
+  // still be word-segmented. Any failure keeps the uncorrected transcript.
   if (segments.length) {
     onProgress?.(80, "Gemini checking words");
     try {
@@ -79,7 +95,9 @@ export async function transcribeJob(
       if (Array.isArray(corrected) && corrected.length === segments.length) {
         segments = segments.map((s, i) => {
           const nt = (corrected[i] ?? s.text).trim();
-          return nt && nt !== s.text.trim() ? { ...s, text: nt, words: [] } : s;
+          return nt && nt !== s.text.trim()
+            ? { ...s, text: nt, words: spreadChars(nt, s.start, s.end) }
+            : s;
         });
       }
     } catch {
