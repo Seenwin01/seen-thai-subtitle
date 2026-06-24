@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { jobDir, jobPath, safeJobId } from "@/lib/storage";
-import { probe, burnSubtitles, toAspect, scaleTo, renderTransparentSubs } from "@/lib/ffmpeg";
+import { probe, run, burnSubtitles, toAspect, scaleTo, renderTransparentSubs } from "@/lib/ffmpeg";
 import { generateAss } from "@/lib/ass";
 import { pickEmphasis } from "@/lib/keywords";
 import { emojiForCue } from "@/lib/emoji";
@@ -20,6 +20,34 @@ export const runtime = "nodejs";
 export const maxDuration = 600;
 
 const WATERMARK_TEXT = "ซับไทย AI";
+
+// Auto-contrast: sample the average brightness (YAVG 0-255) of the subtitle band
+// once per second, so generateAss can pick a readable text/outline colour per cue.
+// Returns a lookup t(sec)->luma, or undefined (disabled / failed -> fixed colours).
+async function sampleLuma(
+  input: string,
+  position: string
+): Promise<((t: number) => number) | undefined> {
+  const cropY = position === "top" ? "0" : position === "center" ? "ih/3" : "ih*2/3";
+  try {
+    const out = await run("ffmpeg", [
+      "-hide_banner",
+      "-i",
+      input,
+      "-vf",
+      `crop=iw:ih/3:0:${cropY},fps=1,signalstats,metadata=print:file=-`,
+      "-f",
+      "null",
+      "-",
+    ]);
+    const lumas: number[] = [];
+    for (const mm of out.matchAll(/YAVG=([\d.]+)/g)) lumas.push(parseFloat(mm[1]));
+    if (!lumas.length) return undefined;
+    return (t: number) => lumas[Math.max(0, Math.min(lumas.length - 1, Math.floor(t)))];
+  } catch {
+    return undefined;
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -58,11 +86,16 @@ export async function POST(req: NextRequest) {
     setStatus(jobId, { state: "processing", progress: 5, step: "กำลังเตรียมซับ" });
 
     getQueue().enqueue(async () => {
+      // auto-contrast on by default; set style.autoContrast=false to use fixed colours
+      const autoContrast = (body.style as { autoContrast?: boolean }).autoContrast !== false;
+      const lumaAt = autoContrast ? await sampleLuma(input, body.style.position) : undefined;
+
       const ass = generateAss(
         body.segments, body.style, info.width, info.height,
         watermark ? WATERMARK_TEXT : undefined,
         pickEmphasis,
-        emojiForCue
+        emojiForCue,
+        lumaAt
       );
       fs.writeFileSync(jobPath(jobId, "subtitles.ass"), ass, "utf-8");
       fs.writeFileSync(jobPath(jobId, "subtitles.srt"), generateSrt(body.segments), "utf-8");
@@ -72,7 +105,6 @@ export async function POST(req: NextRequest) {
       let outputName: string;
 
       if (body.transparent) {
-        // subtitles-only video with alpha, for overlaying in an editor
         setStatus(jobId, { state: "processing", progress: 35, step: "กำลังเรนเดอร์ซับโปร่งใส (.mov)" });
         outputName = "overlay.mov";
         await renderTransparentSubs(
