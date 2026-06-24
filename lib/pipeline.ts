@@ -2,7 +2,6 @@ import path from "path";
 import fs from "fs";
 import { jobPath } from "./storage";
 import { run } from "./ffmpeg";
-import { correctThai } from "./correct";
 import { mergeThaiTokens } from "./thai";
 import type { Segment, Transcript, Word } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
@@ -11,13 +10,62 @@ const MAX_DUR = 4; // seconds per cue
 const MAX_WORDS = 12; // words per cue
 const MAX_CHARS = 42; // chars per cue
 
+// ---------------------------------------------------------------------------
+// Context-aware Gemini proofreader. Sends the WHOLE transcript at once so the
+// model can use surrounding lines to pick the right word (tones มา↔ม้า, non-
+// words ยอดมิ→ยอดนิยม, garbled loanwords Oklick→อะคริลิค, Everlight→Everest).
+// Returns corrected lines (same length/order) or null on any failure.
+// Tune the domain hint with env STT_DOMAIN.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+async function geminiCorrect(lines: string[]): Promise<string[] | null> {
+  const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!key || !lines.length) return null;
+  const domain =
+    process.env.STT_DOMAIN ||
+    "a Thai-language Ford pickup/SUV review video (models: Everest, Ranger, VICTOR body kit, Platinum, Wildtrak)";
+  const sys =
+    `You proofread Thai subtitles produced by automatic speech-to-text from ${domain}. ` +
+    `You receive a JSON array of consecutive subtitle lines. Fix ONLY transcription errors, ` +
+    `using context across lines: misheard words, wrong Thai tone/vowels (e.g. มา↔ม้า), ` +
+    `non-words (e.g. ยอดมิ→ยอดนิยม), and garbled English loanwords/brands ` +
+    `(e.g. Oklick→อะคริลิค, Everlight/Everless→Everest, Daytim→Daytime). ` +
+    `Keep real brand/model names (Ford, Everest, Ranger, VICTOR, Platinum, Wildtrak). ` +
+    `Do NOT translate, paraphrase, merge, split, reorder, add or delete lines, and keep each ` +
+    `line's length close to the original. Return ONLY a JSON array of the corrected strings, ` +
+    `exactly the same length and order as the input.`;
+  const user = `Return a JSON array of exactly ${lines.length} corrected strings.\n\nInput:\n${JSON.stringify(lines)}`;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: "POST",
+        headers: { "x-goog-api-key": key, "content-type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: sys }] },
+          contents: [{ role: "user", parts: [{ text: user }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 8192 },
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    };
+    const raw = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
+    const m = raw.match(/\[[\s\S]*\]/);
+    if (!m) return null;
+    const arr = JSON.parse(m[0]);
+    if (!Array.isArray(arr) || arr.length !== lines.length) return null;
+    return arr.map((x) => String(x));
+  } catch {
+    return null;
+  }
+}
+
 // Cloud Whisper returns per-character tokens and sometimes breaks a SEGMENT in
-// the middle of a word (e.g. "เครื่องยนต" | "์ดีเซล"), which leaves orphan vowel
-// marks at the start of a cue and makes ass.ts (which chunks seg.words straight
-// into cues) cut mid-word. Fix: flatten every token into one timed stream, merge
-// it into real Thai WORDS (lib/thai.ts, dictionary-glued), then re-chunk into
-// cues at WORD boundaries only. job.json now holds word-level tokens, so the
-// burned .ass is always word-aligned.
+// the middle of a word, which leaves orphan vowel marks at the start of a cue.
+// Flatten every token into one timed stream, merge into real Thai WORDS
+// (lib/thai.ts, dictionary-glued), then re-chunk at WORD boundaries only.
 function rechunk(words: Word[]): Segment[] {
   const out: Segment[] = [];
   let buf: Word[] = [];
@@ -49,8 +97,7 @@ function resegment(segments: Segment[]): Segment[] {
   return rechunk(mergeThaiTokens(all));
 }
 
-// Rebuild word tokens for a rewritten line: spread chars over its time span,
-// then merge back into Thai words so the cue stays word-aligned.
+// Rebuild word tokens for a rewritten line so the cue stays word-aligned.
 function wordsFor(text: string, start: number, end: number): Word[] {
   const chars = Array.from(text);
   const n = chars.length || 1;
@@ -63,14 +110,13 @@ function wordsFor(text: string, start: number, end: number): Word[] {
   return mergeThaiTokens(spread);
 }
 
-// Force canonical spelling for brand / model names that STT + the LLM mishear.
-// Extend via env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
-//   STT_GLOSSARY="wictor=VICTOR,วิคเตอร์=VICTOR,everless=Everest"
+// Pin canonical brand spellings deterministically (belt & braces after Gemini).
+// Extend via env STT_GLOSSARY="wrong=correct,..." e.g. "oklick=อะคริลิค".
 function buildGlossary(): Array<[RegExp, string]> {
   const g: Array<[RegExp, string]> = [
     [/\bw[i1]ctor\b/gi, "VICTOR"],
     [/วิ[คกแ]เตอร์/g, "VICTOR"],
-    [/\bever(?:less|est)?\b/gi, "Everest"],
+    [/\bever(?:less|est|light)\b/gi, "Everest"],
   ];
   for (const pair of (process.env.STT_GLOSSARY || "").split(",")) {
     const [from, to] = pair.split("=").map((x) => x.trim());
@@ -96,8 +142,8 @@ function applyGlossary(segments: Segment[]): Segment[] {
  *   1) extract 16kHz mono audio
  *   2) transcribe with cloud Whisper large-v3 (Groq)
  *   3) re-segment into word-aligned cues (no mid-word cuts)
- *   4) Gemini double-check (correctThai) + glossary
- * Steps 4 never fail the job; on any error the transcript is kept as-is.
+ *   4) context-aware Gemini proofread + glossary
+ * Step 4 never fails the job; on any error the transcript is kept as-is.
  *
  * Required env: GROQ_API_KEY (STT) and GEMINI_API_KEY (correction, optional).
  */
@@ -127,22 +173,17 @@ export async function transcribeJob(
   // merge per-character tokens into word-aligned cues
   segments = resegment(segments);
 
-  // Gemini double-check + glossary. Rewritten lines get fresh word tokens so the
-  // cue stays word-aligned. Any failure keeps the transcript as-is.
+  // context-aware Gemini proofread; rewritten lines get fresh word tokens
   if (segments.length) {
-    onProgress?.(80, "Gemini checking words");
-    try {
-      const corrected = await correctThai(segments.map((s) => s.text));
-      if (Array.isArray(corrected) && corrected.length === segments.length) {
-        segments = segments.map((s, i) => {
-          const nt = (corrected[i] ?? s.text).trim();
-          return nt && nt !== s.text.trim()
-            ? { ...s, text: nt, words: wordsFor(nt, s.start, s.end) }
-            : s;
-        });
-      }
-    } catch {
-      /* keep uncorrected transcript */
+    onProgress?.(80, "AI proofreading words");
+    const corrected = await geminiCorrect(segments.map((s) => s.text));
+    if (corrected) {
+      segments = segments.map((s, i) => {
+        const nt = (corrected[i] ?? s.text).trim();
+        return nt && nt !== s.text.trim()
+          ? { ...s, text: nt, words: wordsFor(nt, s.start, s.end) }
+          : s;
+      });
     }
     segments = applyGlossary(segments);
   }
