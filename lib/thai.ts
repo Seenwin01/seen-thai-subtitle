@@ -15,6 +15,73 @@ export function isThai(text: string): boolean {
   return THAI_RANGE.test(text);
 }
 
+// ---------------------------------------------------------------------------
+// Compound / loanword dictionary. Intl.Segmenter('th') uses the ICU dictionary
+// which over-splits compounds and transliterations it doesn't know, e.g.
+//   แรงบิด -> แรง|บิด,  นิวตัน -> นิ|ว|ตัน,  สเกิร์ต -> ส|เกิร์ต,  ล้อแม็ก -> ล้อ|แม็ก
+// After segmenting we glue adjacent groups back together when they form a word
+// in this dictionary (longest match first). Extend at runtime with env
+// THAI_DICT (a comma-separated list), e.g. THAI_DICT="แรงบิด,วิ่งวน�เทอร์โบ".
+const BUILTIN_DICT = [
+  "นิวตันเมตร", "นิวตัน", "แรงบิด", "แรงม้า", "เครื่องยนต์", "ดีเซล", "เบนซิน",
+  "ไทม์มิ่ง", "เทอร์โบ", "ล้อแม็ก", "แม็ก", "สเกิร์ต", "สปอยเลอร์", "กระจังหน้า",
+  "กันชน", "ช่วงล่าง", "หน้ากว้าง", "แก้มยาง", "สีขาวมุก", "ไฟหน้า", "ไฟท้าย",
+  "เกียร์ออโต้", "เกียร์", "ระบบเบรก", "ดิสก์เบรก", "พวงมาลัย", "แดชบอร์ด",
+  "เบาะหนัง", "ซันรูฟ", "กล้องถอยหลัง", "เซ็นเซอร์", "ครูซคอนโทรล",
+];
+
+function buildDict(): string[] {
+  const extra = (process.env.THAI_DICT || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // longest first so multi-word compounds win over their parts
+  return Array.from(new Set([...BUILTIN_DICT, ...extra])).sort(
+    (a, b) => Array.from(b).length - Array.from(a).length
+  );
+}
+
+let _dict: string[] | null = null;
+function dict(): string[] {
+  if (!_dict) _dict = buildDict();
+  return _dict;
+}
+
+/** Glue adjacent word groups whose concatenation is a dictionary word. */
+function glueCompounds(words: Word[]): Word[] {
+  if (words.length < 2) return words;
+  const d = dict();
+  if (!d.length) return words;
+  const out = words.slice();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < out.length; i++) {
+      const maxLen = Math.min(6, out.length - i);
+      for (let len = maxLen; len >= 2; len--) {
+        const joined = out
+          .slice(i, i + len)
+          .map((w) => w.text)
+          .join("");
+        // ICU groups carry trailing whitespace (e.g. "บิด "); compare on the
+        // whitespace-stripped form so "แรง"+"บิด " still matches "แรงบิด".
+        const key = joined.replace(/\s+/g, "");
+        if (d.includes(key)) {
+          out.splice(i, len, {
+            start: out[i].start,
+            end: out[i + len - 1].end,
+            text: joined,
+          });
+          changed = true;
+          break;
+        }
+      }
+      if (changed) break;
+    }
+  }
+  return out;
+}
+
 let _segmenter: Intl.Segmenter | null | undefined;
 function thaiSegmenter(): Intl.Segmenter | null {
   if (_segmenter !== undefined) return _segmenter;
@@ -38,9 +105,9 @@ export function mergeThaiTokens(words: Word[], targetChars = 6, minChars = 3): W
   const seg = thaiSegmenter();
   if (seg) {
     const grouped = mergeBySegmenter(words, seg);
-    if (grouped.length) return grouped;
+    if (grouped.length) return glueCompounds(grouped);
   }
-  return mergeByCharCount(words, targetChars, minChars);
+  return glueCompounds(mergeByCharCount(words, targetChars, minChars));
 }
 
 function mergeBySegmenter(words: Word[], seg: Intl.Segmenter): Word[] {
