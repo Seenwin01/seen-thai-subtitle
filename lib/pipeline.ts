@@ -6,13 +6,42 @@ import { correctThai } from "./correct";
 import type { Segment, Transcript } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
 
+// Force canonical spelling for brand / model names that STT + the LLM tend to
+// mishear (e.g. the wheel/body-kit brand "VICTOR" -> "WICTOR"/"วิคเตอร์").
+// Add more via env STT_GLOSSARY, a comma list of `wrong=correct` pairs, e.g.
+//   STT_GLOSSARY="wictor=VICTOR,วิคเตอร์=VICTOR,เรนเจอร์=Ranger"
+function buildGlossary(): Array<[RegExp, string]> {
+  const g: Array<[RegExp, string]> = [
+    [/\bw[i1]ctor\b/gi, "VICTOR"],
+    [/วิ[คกแ]เตอร์/g, "VICTOR"],
+  ];
+  for (const pair of (process.env.STT_GLOSSARY || "").split(",")) {
+    const [from, to] = pair.split("=").map((x) => x.trim());
+    if (from && to) {
+      const esc = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      g.push([new RegExp(esc, "gi"), to]);
+    }
+  }
+  return g;
+}
+
+function applyGlossary(segments: Segment[]): Segment[] {
+  const glossary = buildGlossary();
+  return segments.map((s) => {
+    let t = s.text;
+    for (const [re, to] of glossary) t = t.replace(re, to);
+    return t !== s.text ? { ...s, text: t, words: [] } : s;
+  });
+}
+
 /**
  * Transcription pipeline:
  *   1) extract 16kHz mono audio
  *   2) transcribe with cloud Whisper large-v3 (Groq) for accurate Thai whose
  *      per-character word tokens match the merger in lib/thai.ts
- *   3) Gemini double-check (correctThai) to fix misheard words / homophones /
- *      proper nouns. Never fails the job if the LLM key is missing or errors.
+ *   3) Gemini double-check (correctThai) to fix misheard words / homophones
+ *   4) glossary pass to pin brand/model spellings (e.g. VICTOR)
+ * Steps 3-4 never fail the job; on any error the transcript is kept as-is.
  *
  * Required env: GROQ_API_KEY (STT) and GEMINI_API_KEY (correction, optional).
  */
@@ -40,9 +69,9 @@ export async function transcribeJob(
   }));
 
   // Gemini double-check: fix misheard Thai words, homophones, proper nouns.
-  // Only the wording is sent to the LLM; segment count / order / timing stay
-  // put. Lines whose text changed drop per-word karaoke timing (renderer falls
-  // back to per-segment timing). Any failure keeps the uncorrected transcript.
+  // Only the wording is sent; segment count / order / timing stay put. Lines
+  // whose text changed drop per-word karaoke timing (renderer falls back to
+  // per-segment timing). Any failure keeps the uncorrected transcript.
   if (segments.length) {
     onProgress?.(80, "Gemini checking words");
     try {
@@ -56,6 +85,7 @@ export async function transcribeJob(
     } catch {
       /* keep uncorrected transcript */
     }
+    segments = applyGlossary(segments);
   }
 
   onProgress?.(95, "formatting subtitles");
