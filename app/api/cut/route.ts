@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { jobPath, newJobId, safeJobId } from "@/lib/storage";
-import { run, cutClip, reframeAround, reframeCenter } from "@/lib/ffmpeg";
+import { run, cutClip, reframeAround, reframeCenter, probe } from "@/lib/ffmpeg";
 import { sliceTranscript } from "@/lib/clips";
 import { setStatus } from "@/lib/jobstatus";
 import { getQueue } from "@/lib/queue";
@@ -45,19 +45,39 @@ export async function POST(req: NextRequest) {
 
       let finalVideo = "cut.mp4";
       if (body.vertical) {
-        setStatus(newId, { state: "processing", progress: 60, step: "กำลังรีเฟรมเป็นแนวตั้ง 9:16" });
-        const vFile = jobPath(newId, "vertical.mp4");
+        // ตรวจสัดส่วนคลิปที่ตัดมาก่อน — ถ้าเป็นแนวตั้งอยู่แล้ว (สูง >= กว้าง)
+        // ไม่ต้องรีเฟรม เพราะทั้งหนักและทำให้พังโดยไม่จำเป็น
+        let alreadyVertical = false;
         try {
-          const out = await run(PYTHON_BIN, [
-            path.join(process.cwd(), "scripts", "reframe.py"),
-            cutFile,
-          ]);
-          const { center_x } = JSON.parse(out.trim());
-          await reframeAround(cutFile, vFile, Number(center_x) || 0.5);
+          const info = await probe(cutFile);
+          alreadyVertical = info.height >= info.width;
         } catch {
-          await reframeCenter(cutFile, vFile);
+          // probe ล้มเหลว — ถือว่าไม่รู้สัดส่วน ปล่อยให้รีเฟรมตามเดิม
+          alreadyVertical = false;
         }
-        finalVideo = "vertical.mp4";
+
+        if (alreadyVertical) {
+          setStatus(newId, {
+            state: "processing",
+            progress: 60,
+            step: "วิดีโอเป็นแนวตั้งอยู่แล้ว ข้ามการรีเฟรม",
+          });
+          // ใช้ cut.mp4 เป็นไฟล์สุดท้ายเลย
+        } else {
+          setStatus(newId, { state: "processing", progress: 60, step: "กำลังรีเฟรมเป็นแนวตั้ง 9:16" });
+          const vFile = jobPath(newId, "vertical.mp4");
+          try {
+            const out = await run(PYTHON_BIN, [
+              path.join(process.cwd(), "scripts", "reframe.py"),
+              cutFile,
+            ]);
+            const { center_x } = JSON.parse(out.trim());
+            await reframeAround(cutFile, vFile, Number(center_x) || 0.5);
+          } catch {
+            await reframeCenter(cutFile, vFile);
+          }
+          finalVideo = "vertical.mp4";
+        }
       }
 
       setStatus(newId, { state: "processing", progress: 92, step: "กำลังจัดข้อมูลซับ" });
