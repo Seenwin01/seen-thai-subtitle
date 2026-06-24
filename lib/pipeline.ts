@@ -6,11 +6,47 @@ import { correctThai } from "./correct";
 import type { Segment, Transcript, Word } from "./types";
 import { transcribeCloud } from "./transcribe-cloud";
 
+// Cloud Whisper sometimes merges 15-20s of speech into one segment. A subtitle
+// that long sticks on screen and drifts out of sync. Split segments into short
+// cues (<= ~MAX_DUR s / ~MAX_CHARS chars) at space boundaries, keeping each
+// word's real timestamp. Done BEFORE the Gemini pass so corrected lines stay
+// short and spreadChars introduces only a tiny timing error.
+const MAX_DUR = 4;
+const MAX_CHARS = 30;
+function splitSegments(segs: Segment[]): Segment[] {
+  const out: Segment[] = [];
+  let id = 0;
+  for (const s of segs) {
+    const ws: Word[] =
+      s.words && s.words.length ? s.words : [{ start: s.start, end: s.end, text: s.text }];
+    let buf: Word[] = [];
+    let chars = 0;
+    const flush = () => {
+      const text = buf.map((w) => w.text).join("").trim();
+      if (text) {
+        out.push({ id: id++, start: buf[0].start, end: buf[buf.length - 1].end, text, words: buf.slice() });
+      }
+      buf = [];
+      chars = 0;
+    };
+    for (const w of ws) {
+      buf.push(w);
+      chars += Array.from(w.text || "").length;
+      const dur = w.end - buf[0].start;
+      const isSpace = !/\S/.test(w.text || "");
+      const hard = chars >= MAX_CHARS * 1.6;
+      if ((isSpace && (dur >= MAX_DUR || chars >= MAX_CHARS)) || hard) flush();
+    }
+    if (buf.length) flush();
+  }
+  return out;
+}
+
 // When Gemini / the glossary rewrites a line, its original per-character word
 // tokens no longer match the new text, so we regenerate them: one token per
 // character, spread evenly across the segment's [start, end]. lib/thai.ts then
-// re-groups these into real Thai words (Intl.Segmenter). Without this the line
-// would have no word tokens and could not be segmented ("ไม่เป็นคำ").
+// re-groups these into real Thai words (Intl.Segmenter). Because segments are
+// already short (splitSegments), the even spread is close enough to real timing.
 function spreadChars(text: string, start: number, end: number): Word[] {
   const chars = Array.from(text);
   const n = chars.length || 1;
@@ -53,11 +89,10 @@ function applyGlossary(segments: Segment[]): Segment[] {
 /**
  * Transcription pipeline:
  *   1) extract 16kHz mono audio
- *   2) transcribe with cloud Whisper large-v3 (Groq) for accurate Thai whose
- *      per-character word tokens match the merger in lib/thai.ts
- *   3) Gemini double-check (correctThai) to fix misheard words / homophones
- *   4) glossary pass to pin brand/model spellings (e.g. VICTOR)
- * Steps 3-4 never fail the job; on any error the transcript is kept as-is.
+ *   2) transcribe with cloud Whisper large-v3 (Groq)
+ *   3) split long segments into short, well-timed cues
+ *   4) Gemini double-check (correctThai) + glossary (e.g. VICTOR)
+ * Steps 4 never fail the job; on any error the transcript is kept as-is.
  *
  * Required env: GROQ_API_KEY (STT) and GEMINI_API_KEY (correction, optional).
  */
@@ -84,10 +119,11 @@ export async function transcribeJob(
     words: (s.words ?? []).map((w) => ({ start: w.start, end: w.end, text: w.text })),
   }));
 
-  // Gemini double-check: fix misheard Thai words, homophones, proper nouns.
-  // Only the wording is sent; segment count / order / timing stay put. Lines
-  // whose text changed get fresh per-character tokens (spreadChars) so they can
-  // still be word-segmented. Any failure keeps the uncorrected transcript.
+  // keep cues short & well-timed before any text rewriting
+  segments = splitSegments(segments);
+
+  // Gemini double-check + glossary. Lines whose text changed get fresh
+  // per-character tokens (spreadChars); any failure keeps the transcript as-is.
   if (segments.length) {
     onProgress?.(80, "Gemini checking words");
     try {
