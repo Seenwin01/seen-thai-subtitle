@@ -6,6 +6,12 @@ export interface VideoInfo {
   duration: number;
 }
 
+// จำกัดจำนวน thread ของ ffmpeg/x264 — ปกติ ffmpeg จะ auto ใช้ตามจำนวน core
+// ของเครื่อง host (เช่น 60) ซึ่งกิน RAM มหาศาลจน container บน Railway โดน
+// OOM kill (ffmpeg exited null) ตอน re-encode/รีเฟรม. ค่า default 2 ปลอดภัย
+// และตั้งทับได้ด้วย env FFMPEG_THREADS.
+const FFMPEG_THREADS = process.env.FFMPEG_THREADS || "2";
+
 export function run(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
@@ -73,6 +79,7 @@ export async function cutClip(
 ): Promise<void> {
   await run("ffmpeg", [
     "-y", "-ss", String(start), "-i", input, "-t", String(duration),
+    "-threads", FFMPEG_THREADS,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
     "-c:a", "aac", "-pix_fmt", "yuv420p", output,
   ]);
@@ -83,6 +90,7 @@ export async function reframeCenter(input: string, output: string): Promise<void
     "crop='min(iw,ih*9/16)':'min(ih,iw*16/9)',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920";
   await run("ffmpeg", [
     "-y", "-i", input, "-vf", vf,
+    "-threads", FFMPEG_THREADS,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
     "-c:a", "copy", "-pix_fmt", "yuv420p", output,
   ]);
@@ -99,6 +107,7 @@ export async function reframeAround(
   const vf = `crop=${cw}:'min(ih,iw*16/9)':${x}:0,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920`;
   await run("ffmpeg", [
     "-y", "-i", input, "-vf", vf,
+    "-threads", FFMPEG_THREADS,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
     "-c:a", "copy", "-pix_fmt", "yuv420p", output,
   ]);
@@ -123,6 +132,7 @@ export async function burnSubtitles(
 
   const args = [
     "-y", "-i", input, "-vf", filter,
+    "-threads", FFMPEG_THREADS,
     "-c:a", "copy", "-c:v", "libx264", "-preset", "veryfast",
     "-crf", "20", "-pix_fmt", "yuv420p", output,
   ];
@@ -143,6 +153,7 @@ export async function toAspect(
   const vf = `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1`;
   await run("ffmpeg", [
     "-y", "-i", input, "-vf", vf,
+    "-threads", FFMPEG_THREADS,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
     "-c:a", "copy", "-pix_fmt", "yuv420p", output,
   ]);
@@ -156,6 +167,7 @@ export async function scaleTo(
 ): Promise<void> {
   await run("ffmpeg", [
     "-y", "-i", input, "-vf", `scale=-2:${height}:flags=lanczos`,
+    "-threads", FFMPEG_THREADS,
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
     "-c:a", "copy", "-pix_fmt", "yuv420p", output,
   ]);
@@ -182,6 +194,7 @@ export async function renderTransparentSubs(
     "-f", "lavfi",
     "-i", `color=c=black@0.0:s=${w}x${h}:r=30:d=${Math.max(1, durationSec)}`,
     "-vf", `format=rgba,${ass}`,
+    "-threads", FFMPEG_THREADS,
     "-c:v", "qtrle", "-pix_fmt", "argb",
     output,
   ]);
