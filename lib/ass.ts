@@ -163,7 +163,9 @@ export function generateAss(
           .map((cw, j) => {
             const t = escapeText(applyCase(cw.text, style.uppercase));
             if (j === i && style.wordPop) {
-              return `{\\fscx70\\fscy70\\t(0,90,\\fscx118\\fscy118)\\t(90,170,\\fscx100\\fscy100)\\c${highlight}}${t}{\\c${base}}`;
+              // vertical-only pop: height grows, width stays -> no horizontal
+              // reflow, so the centred line never shakes left/right.
+              return `{\\fscy70\\t(0,90,\\fscy120)\\t(90,170,\\fscy100)\\c${highlight}}${t}{\\c${base}}`;
             }
             const color = j === i ? highlight : emph[j] ? emphasis : base;
             return wrap(t, color);
