@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { SubtitleStyle } from "@/lib/types";
 import { STYLE_PRESETS } from "@/lib/styles";
+import { FONT_OPTIONS, fontStack } from "@/lib/fonts";
 import StylePreview from "./StylePreview";
 
 // Tiny static sample that shows a style's colours/outline/box at a glance,
@@ -20,7 +21,8 @@ function MiniSample({ s }: { s: SubtitleStyle }) {
     >
       <span
         style={{
-          fontWeight: s.bold ? 800 : 600,
+          fontFamily: fontStack(s.font),
+          fontWeight: s.bold ? 700 : 400,
           fontSize: 13,
           color: s.color,
           textShadow:
@@ -166,6 +168,30 @@ export default function StylePicker({
           ))}
       </div>
 
+      <Control label="ฟอนต์">
+        <select
+          value={style.font}
+          onChange={(e) => set({ font: e.target.value })}
+          style={{ fontFamily: fontStack(style.font) }}
+          className="w-full rounded-lg bg-white/5 px-2 py-1.5 text-sm"
+        >
+          {(["viral", "clean", "display"] as const).map((cat) => (
+            <optgroup
+              key={cat}
+              label={
+                cat === "viral" ? "ไวรัล / แคปชัน" : cat === "clean" ? "อ่านง่าย / ทางการ" : "ดิสเพลย์ / ลายมือ"
+              }
+            >
+              {FONT_OPTIONS.filter((f) => f.category === cat).map((f) => (
+                <option key={f.name} value={f.name} style={{ fontFamily: fontStack(f.name) }}>
+                  {f.label}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </Control>
+
       <Control label="ขนาดฟอนต์">
         <input
           type="range"
@@ -205,28 +231,6 @@ export default function StylePicker({
             value={style.highlightColor}
             onChange={(e) => set({ highlightColor: e.target.value })}
             className="h-8 w-full rounded bg-transparent"
-          />
-        </Control>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <Control label="สีขอบ">
-          <input
-            type="color"
-            value={style.outlineColor}
-            onChange={(e) => set({ outlineColor: e.target.value })}
-            className="h-8 w-full rounded bg-transparent"
-          />
-        </Control>
-        <Control label="พื้นหลังกล่อง">
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={style.boxOpacity}
-            onChange={(e) => set({ boxOpacity: Number(e.target.value) })}
-            className="w-full"
           />
         </Control>
       </div>
@@ -273,6 +277,16 @@ export default function StylePicker({
           className="h-4 w-4 accent-brand-500"
         />
         ตัวหนา
+      </label>
+
+      <label className="flex items-center gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={style.uppercase}
+          onChange={(e) => set({ uppercase: e.target.checked })}
+          className="h-4 w-4 accent-brand-500"
+        />
+        ตัวพิมพ์ใหญ่ (A–Z)
       </label>
 
       <label className="flex items-center gap-3 text-sm">

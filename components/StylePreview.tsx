@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { SubtitleStyle } from "@/lib/types";
+import { fontStack } from "@/lib/fonts";
 
 // Sample phrase split into karaoke "groups" (Thai, no inter-word spaces).
 const SAMPLE = ["แค่", "พูด", "ก็ได้", "ซับ", "ไวรัล", "ทันที"];
@@ -58,7 +59,8 @@ export default function StylePreview({
         style={{
           margin: 0,
           textAlign: "center",
-          fontWeight: style.bold ? 800 : 500,
+          fontFamily: fontStack(style.font),
+          fontWeight: style.bold ? 700 : 400,
           color: style.color,
           fontSize,
           lineHeight: 1.25,
