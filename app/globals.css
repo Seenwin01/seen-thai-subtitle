@@ -1,3 +1,8 @@
+/* Subtitle fonts for the LIVE PREVIEW (browser). The burned .ass uses the same
+   family names but reads .ttf files from ./fonts via libass. Keep this list in
+   sync with lib/fonts.ts. @import must stay first in the file. */
+@import url('https://fonts.googleapis.com/css2?family=Kanit:wght@400;700&family=Prompt:wght@400;700&family=Mitr:wght@400;600&family=Bai+Jamjuree:wght@400;700&family=Sarabun:wght@400;700&family=Noto+Sans+Thai:wght@400;700&family=IBM+Plex+Sans+Thai:wght@400;600&family=Krub:wght@400;700&family=Chonburi&family=Sriracha&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
