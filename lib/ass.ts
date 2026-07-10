@@ -1,4 +1,9 @@
 import type { Segment, SubtitleStyle, Word } from "./types";
+import { safeFontName } from "./fonts";
+import { isThai, mergeThaiTokens } from "./thai";
+import { activeUntil } from "./cues";
+import { pickEmphasis } from "./keywords";
+import { emojiForCue } from "./emoji";
 
 // Convert "#RRGGBB" -> ASS "&HAABBGGRR" (alpha 00 = opaque, FF = transparent)
 function hexToAss(hex: string, alpha = 0): string {
@@ -30,7 +35,14 @@ function alignment(pos: SubtitleStyle["position"]): number {
 }
 
 function escapeText(text: string): string {
-  return text.replace(/\n/g, "\\N").replace(/\{/g, "(").replace(/\}/g, ")");
+  // Neutralize backslashes FIRST (a lone "\\x" would become an ASS override
+  // tag and corrupt/hide the line), strip CR, THEN emit ASS line breaks.
+  return text
+    .replace(/\\/g, "/")
+    .replace(/\r/g, "")
+    .replace(/\n/g, "\\N")
+    .replace(/\{/g, "(")
+    .replace(/\}/g, ")");
 }
 
 function applyCase(text: string, upper: boolean): string {
@@ -46,10 +58,8 @@ function chunkWords(words: Word[], max: number): Word[][] {
 
 /**
  * Generate a full .ass subtitle file.
- * `emphasize` colours keywords; `emojiOf` appends an emoji; `lumaAt(t)` (0-255)
- * enables auto-contrast: each cue's base text + outline colour is chosen from the
- * scene brightness behind it (bright scene -> dark text/white outline, dark scene
- * -> white text/black outline). Highlight/emphasis colours are kept as-is.
+ * `emphasize` / `emojiOf` default to the shared lib (keywords/emoji) so the
+ * burned output matches the live preview; pass your own to override.
  */
 export function generateAss(
   segments: Segment[],
@@ -57,9 +67,8 @@ export function generateAss(
   playW: number,
   playH: number,
   watermark?: string,
-  emphasize?: (texts: string[]) => boolean[],
-  emojiOf?: (texts: string[]) => string | null,
-  lumaAt?: (t: number) => number
+  emphasize: (texts: string[]) => boolean[] = pickEmphasis,
+  emojiOf: (texts: string[]) => string | null = emojiForCue
 ): string {
   const borderStyle = style.boxOpacity > 0 ? 3 : 1;
   const backColour = hexToAss("#000000", 1 - style.boxOpacity);
@@ -70,14 +79,17 @@ export function generateAss(
   const bold = style.bold ? -1 : 0;
   const marginV = Math.round(playH * 0.08);
 
-  // fontSize authored on a 1000px-tall reference -> scale with the video height.
-  const sizeScale = playH / 1000;
-  const fontSize = Math.max(8, Math.round(style.fontSize * sizeScale));
-  const outlineW = Math.max(0, +(style.outlineWidth * sizeScale).toFixed(2));
-
-  // auto-contrast colours (when lumaAt provided)
-  const AC_DARK = hexToAss("#0B0B0B");
-  const AC_LIGHT = hexToAss("#FFFFFF");
+  // --- Resolution-independent sizing (matches the live preview) -------------
+  // `style.fontSize` is authored as a per-mille of the FRAME HEIGHT (e.g. 54 =>
+  // 5.4% of height), NOT an absolute pixel count. Both the burned .ass and the
+  // HTML preview (components/VideoPreview.tsx) multiply it by the frame height
+  // so the text occupies the SAME proportion of the frame regardless of the
+  // clip's real resolution — so "the burn looks like the preview".
+  //   ass px = fontSize/1000 * PlayResY(=playH)
+  const scale = playH / 1000;
+  const fontPx = Math.max(8, Math.round(style.fontSize * scale));
+  const outlinePx = +(style.outlineWidth * scale).toFixed(1);
+  const shadowPx = +(0.8 * scale).toFixed(1);
 
   const header = [
     "[Script Info]",
@@ -89,7 +101,7 @@ export function generateAss(
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Default,${style.font},${fontSize},${primary},${primary},${outline},${backColour},${bold},0,0,0,100,100,0,0,${borderStyle},${outlineW},1,${alignment(
+    `Style: Default,${safeFontName(style.font)},${fontPx},${primary},${primary},${outline},${backColour},${bold},0,0,0,100,100,0,0,${borderStyle},${outlinePx},${shadowPx},${alignment(
       style.position
     )},40,40,${marginV},1`,
     "",
@@ -98,36 +110,26 @@ export function generateAss(
   ].join("\n");
 
   const lines: string[] = [];
+  const wrap = (t: string, color: string) =>
+    color === primary ? t : `{\\c${color}}${t}{\\c${primary}}`;
 
   for (const seg of segments) {
-    const words =
+    const thai = isThai(seg.text);
+    // Thai is written with no inter-word spaces; spaced languages keep " ".
+    const sep = thai ? "" : " ";
+
+    let words: Word[] =
       seg.words && seg.words.length > 0
         ? seg.words
         : [{ start: seg.start, end: seg.end, text: seg.text }];
+    // Merge per-character Thai tokens into readable, mark-safe groups.
+    if (thai) words = mergeThaiTokens(words);
+
     const cues = chunkWords(words, style.maxWordsPerCue);
 
     for (const cue of cues) {
       const cueStart = cue[0].start;
       const cueEnd = cue[cue.length - 1].end;
-
-      // per-cue base + outline colour (auto-contrast or the style default)
-      let base = primary;
-      let cueOutline = outline;
-      let pre = "";
-      if (lumaAt) {
-        const y = lumaAt(cueStart);
-        if (y >= 140) {
-          base = AC_DARK;
-          cueOutline = AC_LIGHT;
-        } else {
-          base = AC_LIGHT;
-          cueOutline = AC_DARK;
-        }
-        pre = `{\\c${base}\\3c${cueOutline}}`;
-      }
-      const wrap = (t: string, color: string) =>
-        color === base ? t : `{\\c${color}}${t}{\\c${base}}`;
-
       const emph =
         style.autoEmphasis && emphasize
           ? emphasize(cue.map((w) => w.text))
@@ -137,42 +139,42 @@ export function generateAss(
       const tail = emoji ? ` ${emoji}` : "";
 
       if (!perWord) {
-        const text = applyCase(cue.map((w) => w.text).join(" ").trim(), style.uppercase);
+        const text = applyCase(cue.map((w) => w.text).join(sep).trim(), style.uppercase);
         lines.push(
-          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${pre}${escapeText(text)}${tail}`
+          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${escapeText(text)}${tail}`
         );
         continue;
       }
 
       if (!style.wordHighlight) {
+        // static cue, keywords coloured permanently
         const rendered = cue
-          .map((w, j) => wrap(escapeText(applyCase(w.text, style.uppercase)), emph[j] ? emphasis : base))
-          .join(" ");
+          .map((w, j) => wrap(escapeText(applyCase(w.text, style.uppercase)), emph[j] ? emphasis : primary))
+          .join(sep);
         lines.push(
-          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${pre}${rendered}${tail}`
+          `Dialogue: 0,${secToAss(cueStart)},${secToAss(cueEnd)},Default,,0,0,,${rendered}${tail}`
         );
         continue;
       }
 
-      // karaoke: one event per word; active=highlight, keyword=emphasis, else base
+      // karaoke: one event per word; active=highlight, keyword=emphasis, else primary
       for (let i = 0; i < cue.length; i++) {
         const w = cue[i];
         const start = w.start;
-        const end = i < cue.length - 1 ? cue[i + 1].start : cueEnd;
+        const end = activeUntil(cue, i, cueEnd);
         const rendered = cue
           .map((cw, j) => {
             const t = escapeText(applyCase(cw.text, style.uppercase));
             if (j === i && style.wordPop) {
-              // vertical-only pop: height grows, width stays -> no horizontal
-              // reflow, so the centred line never shakes left/right.
-              return `{\\fscy70\\t(0,90,\\fscy120)\\t(90,170,\\fscy100)\\c${highlight}}${t}{\\c${base}}`;
+              // scale pop: shrink -> overshoot -> settle, timed to event start
+              return `{\\fscx70\\fscy70\\t(0,90,\\fscx118\\fscy118)\\t(90,170,\\fscx100\\fscy100)\\c${highlight}}${t}{\\c${primary}}`;
             }
-            const color = j === i ? highlight : emph[j] ? emphasis : base;
+            const color = j === i ? highlight : emph[j] ? emphasis : primary;
             return wrap(t, color);
           })
-          .join(" ");
+          .join(sep);
         lines.push(
-          `Dialogue: 0,${secToAss(start)},${secToAss(end)},Default,,0,0,,${pre}${rendered}${tail}`
+          `Dialogue: 0,${secToAss(start)},${secToAss(end)},Default,,0,0,,${rendered}${tail}`
         );
       }
     }
@@ -181,7 +183,9 @@ export function generateAss(
   if (watermark) {
     const wm = escapeText(watermark);
     lines.push(
-      `Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,,{\\an9\\alpha&H90&\\fs28\\bord1}${wm}`
+      `Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,,{\\an9\\alpha&H90&\\fs${Math.round(
+        28 * scale
+      )}\\bord1}${wm}`
     );
   }
 
