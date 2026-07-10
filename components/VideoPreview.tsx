@@ -2,9 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Segment, SubtitleStyle } from "@/lib/types";
-import { buildCues, activeCue, activeUntil } from "@/lib/cues";
-import { fontStack } from "@/lib/fonts";
-import { isThai } from "@/lib/thai";
+import { buildCues, activeCue } from "@/lib/cues";
 import { pickEmphasis } from "@/lib/keywords";
 import { emojiForCue } from "@/lib/emoji";
 
@@ -13,29 +11,62 @@ export default function VideoPreview({
   segments,
   style,
   onReady,
-  showSafeZones = true,
 }: {
   src: string;
   segments: Segment[];
   style: SubtitleStyle;
   onReady?: (api: { seek: (t: number) => void }) => void;
-  /** Show TikTok/Reels UI safe-zone guides over the 9:16 frame. */
-  showSafeZones?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastSampleRef = useRef(0);
   const [t, setT] = useState(0);
+  const [videoH, setVideoH] = useState(0);
+  const [luma, setLuma] = useState(255); // scene brightness 0-255 (subtitle band)
+
+  // auto-contrast matches the render (lib/ass.ts): on unless style.autoContrast===false
+  const autoContrast = (style as { autoContrast?: boolean }).autoContrast !== false;
 
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     let raf = 0;
     const tick = () => {
       setT(v.currentTime);
+      const h = v.clientHeight;
+      setVideoH((prev) => (prev !== h ? h : prev));
+
+      // sample subtitle-band brightness ~4x/sec (cheap, same-origin video)
+      const now = performance.now();
+      if (autoContrast && v.videoWidth && now - lastSampleRef.current > 250) {
+        lastSampleRef.current = now;
+        try {
+          const c = canvasRef.current!;
+          c.width = 8;
+          c.height = 8;
+          const ctx = c.getContext("2d", { willReadFrequently: true })!;
+          const sh = Math.floor(v.videoHeight / 3);
+          const sy =
+            style.position === "top"
+              ? 0
+              : style.position === "center"
+              ? Math.floor(v.videoHeight / 3)
+              : Math.floor((v.videoHeight * 2) / 3);
+          ctx.drawImage(v, 0, sy, v.videoWidth, sh, 0, 0, 8, 8);
+          const d = ctx.getImageData(0, 0, 8, 8).data;
+          let sum = 0;
+          for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          setLuma(sum / (d.length / 4));
+        } catch {
+          /* tainted/unavailable -> keep last luma */
+        }
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [autoContrast, style.position]);
 
   useEffect(() => {
     onReady?.({
@@ -55,8 +86,6 @@ export default function VideoPreview({
     cue && style.autoEmphasis ? pickEmphasis(cue.words.map((w) => w.text)) : null;
   const emphasisColor = style.emphasisColor ?? style.highlightColor;
   const emoji = cue && style.autoEmoji ? emojiForCue(cue.words.map((w) => w.text)) : null;
-  // Thai has no inter-word spaces; keep groups joined so phrases read naturally.
-  const sep = cue && isThai(cue.words.map((w) => w.text).join("")) ? "" : " ";
 
   const align =
     style.position === "top"
@@ -65,52 +94,42 @@ export default function VideoPreview({
       ? "items-center"
       : "items-end pb-[8%]";
 
+  // match lib/ass.ts: fontSize/outline scale with the video height (1000px ref)
+  const scale = videoH > 0 ? videoH / 1000 : 0.4;
+  const fontSizePx = Math.max(10, style.fontSize * scale);
+  const outlinePx = Math.max(1, style.outlineWidth * scale);
+
+  // per-cue base + outline colour (auto-contrast or the chosen style colours)
+  const bright = luma >= 140;
+  const baseColor = autoContrast ? (bright ? "#0B0B0B" : "#FFFFFF") : style.color;
+  const outlineColor = autoContrast ? (bright ? "#FFFFFF" : "#000000") : style.outlineColor;
+
   return (
-    <div
-      className="relative mx-auto aspect-[9/16] w-full max-w-sm overflow-hidden rounded-2xl bg-black"
-      // container-type: size lets the caption size in `cqh` (1% of THIS frame's
-      // height) instead of viewport `vw`, so the preview font is the exact same
-      // fraction of the frame that lib/ass.ts burns (fontSize/1000 of height).
-      style={{ containerType: "size" }}
-    >
-      <video
-        ref={videoRef}
-        src={src}
-        controls
-        className="absolute inset-0 h-full w-full object-contain"
-        playsInline
-      />
+    <div className="relative mx-auto w-full max-w-sm overflow-hidden rounded-2xl bg-black">
+      <video ref={videoRef} src={src} controls className="h-auto w-full" playsInline />
       <div
         className={`pointer-events-none absolute inset-0 flex justify-center px-4 text-center ${align}`}
       >
         {cue && (
           <p
             style={{
-              fontFamily: fontStack(style.font),
-              // Same formula as lib/ass.ts: fontSize/1000 of frame height.
-              // cqh = 1% of the container height, so fontSize/10 cqh == that.
-              fontSize: `${style.fontSize / 10}cqh`,
-              // 700/400 = the weights actually loaded (globals.css) and the ones
-              // in the bundled .ttf, so the preview weight matches the burn.
-              fontWeight: style.bold ? 700 : 400,
-              color: style.color,
+              fontSize: `${fontSizePx}px`,
+              fontWeight: style.bold ? 800 : 500,
+              color: baseColor,
               textShadow:
                 style.boxOpacity > 0
                   ? "none"
-                  : `0 0 ${(style.outlineWidth + 1) / 10}cqh ${style.outlineColor}, 0 0.2cqh 0.6cqh rgba(0,0,0,.9)`,
+                  : `0 0 ${outlinePx + 1}px ${outlineColor}, ${outlinePx}px 0 ${outlineColor}, -${outlinePx}px 0 ${outlineColor}, 0 ${outlinePx}px ${outlineColor}, 0 -${outlinePx}px ${outlineColor}`,
               background:
                 style.boxOpacity > 0 ? `rgba(0,0,0,${style.boxOpacity})` : "transparent",
-              padding: style.boxOpacity > 0 ? "0.15em 0.5em" : 0,
+              padding: style.boxOpacity > 0 ? "4px 12px" : 0,
               borderRadius: 8,
               lineHeight: 1.25,
               textTransform: style.uppercase ? "uppercase" : "none",
             }}
           >
             {cue.words.map((w, i) => {
-              // Karaoke: a group stays highlighted until the next group begins,
-              // so the highlight moves continuously instead of flickering.
-              const until = activeUntil(cue.words, i, cue.end);
-              const active = style.wordHighlight && t >= w.start && t < until;
+              const active = style.wordHighlight && t >= w.start && t <= w.end;
               const color = active
                 ? style.highlightColor
                 : emph && emph[i]
@@ -123,12 +142,13 @@ export default function VideoPreview({
                   style={{
                     color,
                     display: pop ? "inline-block" : undefined,
-                    transform: pop ? "scale(1.18)" : undefined,
+                    transform: pop ? "scaleY(1.2)" : undefined,
+                    transformOrigin: "bottom",
                     transition: "transform .12s ease",
                   }}
                 >
                   {w.text}
-                  {i < cue.words.length - 1 ? sep : ""}
+                  {i < cue.words.length - 1 ? " " : ""}
                 </span>
               );
             })}
@@ -136,17 +156,6 @@ export default function VideoPreview({
           </p>
         )}
       </div>
-      {showSafeZones && (
-        <div className="pointer-events-none absolute inset-0">
-          {/* bottom: TikTok caption / CTA area */}
-          <div className="absolute inset-x-0 bottom-0 h-[15%] border-t border-dashed border-white/25" />
-          {/* right: like / comment / share buttons */}
-          <div className="absolute inset-y-0 right-0 w-[14%] border-l border-dashed border-white/25" />
-          <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1 text-[10px] text-white/60">
-            เขตปลอดภัย
-          </span>
-        </div>
-      )}
     </div>
   );
 }
